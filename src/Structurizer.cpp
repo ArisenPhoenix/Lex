@@ -1,4 +1,5 @@
-#include "lex/Structurizer.hpp"
+// SPDX-License-Identifier: Apache-2.0
+#include "Structurizer.hpp"
 
  Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
     Vector<RawToken> out;

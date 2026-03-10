@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Lex LANGUAGES CXX VERSION 0.1.0)
 
+# Helps clangd/lint tooling resolve include paths and flags.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 option(LEX_BUILD_SHARED "Build Lex as a shared library" OFF)
 option(LEX_BUILD_EXAMPLES "Build Lex examples" OFF)
 
@@ -17,12 +20,11 @@ set(LEX_SOURCES
 
 # Source currently includes headers as "lex/Scanner.hpp" and "lex/Structurizer.hpp".
 # Keep repo layout as-is by generating a matching include prefix in the build dir.
-set(LEX_GENERATED_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated_include)
-file(MAKE_DIRECTORY ${LEX_GENERATED_INCLUDE_DIR}/lex)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/Scanner.hpp
-               ${LEX_GENERATED_INCLUDE_DIR}/lex/Scanner.hpp COPYONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/Structurizer.hpp
-               ${LEX_GENERATED_INCLUDE_DIR}/lex/Structurizer.hpp COPYONLY)
+# file(MAKE_DIRECTORY ${LEX_GENERATED_INCLUDE_DIR}/lex)
+# configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/Scanner.hpp
+#                ${LEX_GENERATED_INCLUDE_DIR}/lex/Scanner.hpp COPYONLY)
+# configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/Structurizer.hpp
+#                ${LEX_GENERATED_INCLUDE_DIR}/lex/Structurizer.hpp COPYONLY)
 
 if(LEX_BUILD_SHARED)
   add_library(lex SHARED ${LEX_SOURCES} ${LEX_HEADERS})
@@ -42,7 +44,6 @@ set_target_properties(lex PROPERTIES
 target_include_directories(lex
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${LEX_GENERATED_INCLUDE_DIR}>
     $<INSTALL_INTERFACE:include>
 )
 

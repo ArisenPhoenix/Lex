@@ -1,4 +1,5 @@
-#include "lex/Scanner.hpp"
+// SPDX-License-Identifier: Apache-2.0
+#include "Scanner.hpp"
 
 Vector<RawToken> Scanner::scan() {
     rawTokens.emplace_back(RawToken(RawKind::SOF));

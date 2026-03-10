@@ -1,0 +1,4 @@
+{
+  "C_Cpp.default.compileCommands": "/mnt/Internal_SSD/Programming/C++/Lex/build/compile_commands.json",
+  "files.associations": { "*.hpp": "cpp", "*.ipp": "cpp", "*.tpp": "cpp", "*.h": "cpp" }
+}

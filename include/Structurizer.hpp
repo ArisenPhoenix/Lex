@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include <cstdint>
-#include "lex/Scanner.hpp"
+#include "Scanner.hpp"
 
 enum class TokKind : uint16_t {
     SOF, EOF_,
