@@ -9,22 +9,14 @@ option(LEX_BUILD_SHARED "Build Lex as a shared library" OFF)
 option(LEX_BUILD_EXAMPLES "Build Lex examples" OFF)
 
 set(LEX_HEADERS
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/Scanner.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/Structurizer.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/lex/Scanner.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/lex/Structurizer.hpp
 )
 
 set(LEX_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/Scanner.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/Structurizer.cpp
 )
-
-# Source currently includes headers as "lex/Scanner.hpp" and "lex/Structurizer.hpp".
-# Keep repo layout as-is by generating a matching include prefix in the build dir.
-# file(MAKE_DIRECTORY ${LEX_GENERATED_INCLUDE_DIR}/lex)
-# configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/Scanner.hpp
-#                ${LEX_GENERATED_INCLUDE_DIR}/lex/Scanner.hpp COPYONLY)
-# configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/Structurizer.hpp
-#                ${LEX_GENERATED_INCLUDE_DIR}/lex/Structurizer.hpp COPYONLY)
 
 if(LEX_BUILD_SHARED)
   add_library(lex SHARED ${LEX_SOURCES} ${LEX_HEADERS})
