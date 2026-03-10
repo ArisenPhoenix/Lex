@@ -2,7 +2,7 @@
 #pragma once
 
 #include <cstdint>
-#include "Scanner.hpp"
+#include "lex/Scanner.hpp"
 
 enum class TokKind : uint16_t {
     SOF, EOF_,
