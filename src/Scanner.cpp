@@ -213,6 +213,9 @@ RawToken Scanner::readText() {
                 case 'f':  result += '\f'; break;
                 case 'v':  result += '\v'; break;
                 case '\\': result += '\\'; break;
+                case '\n': 
+                case '\r': /* C/C++ line continuation: \ + newline removed */ break;
+                case '?':  result += '?'; break; /* C++ trigraph prevention */
                 case '\'': result += '\''; break;
                 case '"':  result += '"'; break;
                 case '`':  result += '`'; break;
