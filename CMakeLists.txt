@@ -5,6 +5,9 @@ project(Lex LANGUAGES CXX VERSION 0.1.0)
 # Helps clangd/lint tooling resolve include paths and flags.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 option(LEX_BUILD_SHARED "Build Lex as a shared library" OFF)
 option(LEX_BUILD_EXAMPLES "Build Lex examples" OFF)
 
@@ -49,7 +52,6 @@ if(LEX_BUILD_EXAMPLES)
   message(STATUS "LEX_BUILD_EXAMPLES is ON, but no examples are defined yet")
 endif()
 
-include(GNUInstallDirs)
 install(TARGETS lex
   EXPORT LexTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -60,6 +62,25 @@ install(TARGETS lex
 install(FILES ${LEX_HEADERS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/lex)
 
 install(EXPORT LexTargets
+  FILE LexTargets.cmake
   NAMESPACE Lex::
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Lex
+)
+
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/LexConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/LexConfig.cmake"
+  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Lex"
+)
+
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/LexConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/LexConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/LexConfigVersion.cmake"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Lex"
 )
