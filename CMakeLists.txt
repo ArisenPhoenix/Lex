@@ -14,14 +14,11 @@ option(LEX_BUILD_EXAMPLES "Build Lex examples" OFF)
 set(LEX_HEADERS
   ${CMAKE_CURRENT_SOURCE_DIR}/include/lex/Scanner.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/lex/Structurizer.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/lex/Token.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/lex/Lexer.hpp
 )
 
 set(LEX_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/Scanner.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/Structurizer.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/Lexer.cpp
 )
 
 if(LEX_BUILD_SHARED)
