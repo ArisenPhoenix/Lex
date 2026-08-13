@@ -32,9 +32,9 @@ enum class RawKind : uint8_t {
     Char,
     Text,
 
-    Operator,       // single operators only, compoundOps will be determined in a later pass
+    Operator,       // single-char value; identical runs set aux (e.g. '+' aux=2). Compounds are a later pass.
     SpecialChar,    // Anything not clearly an identifier or Operator or Punctuation
-    Punctuation,    // (), {}, [], :, ,, .
+    Punctuation,    // single-char value; identical runs set aux (e.g. ':' aux=2, '.' aux=3)
     Unknown,
     NoOp,
     

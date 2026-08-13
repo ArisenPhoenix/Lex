@@ -173,18 +173,31 @@ RawToken Scanner::readOperator() {
         throw ScannerError("Not Operator in readOperator -> " + std::to_string(current), line, column);
     }
 
-    auto t = RawToken(RawKind::Operator, current, line, column);
-    next();
-    return t;
+    const char ch = current;
+    const int startLine = line;
+    const int startCol = column;
+    int count = 0;
+    while (current == ch) {
+        ++count;
+        next();
+    }
+    return RawToken(RawKind::Operator, ch, startLine, startCol, count);
 }
 
 RawToken Scanner::readPunctuation() {
     if (!isPunctuation(current)) {
         throw ScannerError("Not Punctuation in readPunctuation -> " + std::to_string(current), line, column);
     }
-    auto t = RawToken(RawKind::Punctuation, current, line, column);
-    next();
-    return t;
+
+    const char ch = current;
+    const int startLine = line;
+    const int startCol = column;
+    int count = 0;
+    while (current == ch) {
+        ++count;
+        next();
+    }
+    return RawToken(RawKind::Punctuation, ch, startLine, startCol, count);
 }
 
 RawToken Scanner::readText() {
