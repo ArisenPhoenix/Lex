@@ -34,6 +34,7 @@ struct LayoutConfig {
     bool spacesAllowed = true;
 
     bool keepWhitespaceTokens = false;   // drop Space/Tab tokens unless debugging
+    bool skipWhitespace = false;         // drop Space/Tab even if keepWhitespaceTokens is true
     bool keepComments = true;            // keep comment tokens or drop them
     bool commentsAreLineContent = false; // for indentation: whether comment-only lines count (usually false)
 
@@ -43,6 +44,9 @@ struct LayoutConfig {
 
     // Scope handling mode.
     ScopeMode scopeMode = ScopeMode::Indent;
+    // Do not inject Indent/Dedent or pair brace scopes. Tokens pass through
+    // after whitespace/comment filtering.
+    bool omitScope = false;
 
     // Used when scopeMode == Braces
     Vector<String> scopeOpeners = {"{"};
@@ -63,6 +67,8 @@ private:
     bool isCommentToken(const RawToken& t) const;
     bool isScopeOpen(const RawToken& t) const;
     bool isScopeClose(const RawToken& t) const;
+    bool dropWhitespace() const;
+    bool dropComment(const RawToken& t) const;
 
     void applyIndent(int indent, const RawToken& atToken, Vector<RawToken>& out);
 };

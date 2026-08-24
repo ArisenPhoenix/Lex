@@ -77,6 +77,9 @@ struct CommentPair {
 struct CommentConfig {
     Vector<String> lineStarts;     // "#", "//", ";", "--", ...
     Vector<CommentPair> blockPairs; // { "/*","*/" }, { "{-","-}" }, ...
+    // Consume a comment through its terminator and continue scanning.
+    // No Comment* tokens are emitted.
+    bool skipComments = false;
 };
 
 

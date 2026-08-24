@@ -139,7 +139,7 @@ bool Scanner::isOperator(char c) {
 
 bool Scanner::isPunctuation(char c) {
     return c == ':' || c == ';' || c == '.' || c == ',' || c == '$' || c == '@' || c == '?'
-        || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}';
+        || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c == '#';
 }
 
 bool Scanner::isTextBegin(char c) {
@@ -590,17 +590,19 @@ bool Scanner::tryScanComment() {
     const int startCol  = column;
 
     if (bestKind == StartKind::Line) {
-        rawTokens.emplace_back(RawKind::CommentLineStart, bestLexeme, startLine, startCol, -1);
-
         advanceN(bestLexeme.size());
-        rawTokens.emplace_back(scanLineCommentBody());
+        RawToken body = scanLineCommentBody();
+        if (commentCfg.skipComments) return true;
+        rawTokens.emplace_back(RawKind::CommentLineStart, bestLexeme, startLine, startCol, -1);
+        rawTokens.emplace_back(std::move(body));
         return true;
     }
 
-    // Block comment
-    rawTokens.emplace_back(RawKind::CommentBlockStart, bestLexeme, startLine, startCol, bestBlockIndex);
     advanceN(bestLexeme.size());
-    rawTokens.emplace_back(scanBlockCommentBody(bestBlockIndex)); 
+    RawToken body = scanBlockCommentBody(bestBlockIndex);
+    if (commentCfg.skipComments) return true;
+    rawTokens.emplace_back(RawKind::CommentBlockStart, bestLexeme, startLine, startCol, bestBlockIndex);
+    rawTokens.emplace_back(std::move(body));
     rawTokens.emplace_back(RawKind::CommentBlockEnd, commentCfg.blockPairs[bestBlockIndex].end, line, column, bestBlockIndex);
     return true;
 }

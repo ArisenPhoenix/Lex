@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "lex/Structurizer.hpp"
 
- Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
+Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
     Vector<RawToken> out;
     out.reserve(in.size() + 32);
 
@@ -18,6 +18,24 @@
     RawToken eofTok;
     bool sawEOF = false;
 
+    if (cfg_.omitScope) {
+        for (; i < in.size(); ++i) {
+            const RawToken& t = in[i];
+            if (t.kind == RawKind::EOF_) {
+                eofTok = t;
+                sawEOF = true;
+                break;
+            }
+            if (dropWhitespace() && (t.kind == RawKind::Space || t.kind == RawKind::Tab)) {
+                continue;
+            }
+            if (dropComment(t)) continue;
+            emit(t);
+        }
+        if (sawEOF) out.push_back(eofTok);
+        return out;
+    }
+
     if (cfg_.scopeMode == LayoutConfig::ScopeMode::Braces) {
         int scopeDepth = 0;
 
@@ -29,10 +47,10 @@
                 break;
             }
 
-            if (!cfg_.keepWhitespaceTokens && (t.kind == RawKind::Space || t.kind == RawKind::Tab)) {
+            if (dropWhitespace() && (t.kind == RawKind::Space || t.kind == RawKind::Tab)) {
                 continue;
             }
-            if (!cfg_.keepComments && isCommentToken(t)) {
+            if (dropComment(t)) {
                 continue;
             }
 
@@ -85,14 +103,14 @@
         if (atLineStart) {
             if (t.kind == RawKind::Space) {
                 pendingIndent += (t.aux > 0 ? t.aux : 1);
-                if (cfg_.keepWhitespaceTokens) emit(t);
+                if (!dropWhitespace()) emit(t);
                 continue;
             }
             if (t.kind == RawKind::Tab) {
                 if (!cfg_.tabsAllowed) throw std::runtime_error("Tabs not allowed");
                 int tabs = (t.aux > 0 ? t.aux : 1);
                 pendingIndent += tabs * cfg_.tabWidth;
-                if (cfg_.keepWhitespaceTokens) emit(t);
+                if (!dropWhitespace()) emit(t);
                 continue;
             }
 
@@ -104,7 +122,7 @@
             }
 
             if (isCommentToken(t)) {
-                if (cfg_.keepComments) {emit(t);}
+                if (!dropComment(t)) emit(t);
                 atLineStart = false;
                 continue;
             }
@@ -131,11 +149,11 @@
             continue;
         }
 
-        if (!cfg_.keepWhitespaceTokens && (t.kind == RawKind::Space || t.kind == RawKind::Tab)) {
+        if (dropWhitespace() && (t.kind == RawKind::Space || t.kind == RawKind::Tab)) {
             continue;
         }
 
-        if (!cfg_.keepComments && isCommentToken(t)) {
+        if (dropComment(t)) {
             continue;
         }
 
@@ -152,6 +170,14 @@
     // then emit EOF
     if (sawEOF) out.push_back(eofTok);
     return out;
+}
+
+bool Structurizer::dropWhitespace() const {
+    return cfg_.skipWhitespace || !cfg_.keepWhitespaceTokens;
+}
+
+bool Structurizer::dropComment(const RawToken& t) const {
+    return !cfg_.keepComments && isCommentToken(t);
 }
 
 bool Structurizer::isCommentToken(const RawToken& t) const {
