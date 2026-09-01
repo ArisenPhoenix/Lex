@@ -41,6 +41,7 @@ struct LayoutConfig {
     // “line continuation” / newline suppression (optional for now)
     bool backslashContinuation = false;
     bool parenContinuation = true;       // ignore newline inside (), [], {}
+    bool collapseDuplicates = true;                 // collapse multiple same items into one aux specifying the count (e.g. multiple spaces, tabs, semicolons, newlines)
 
     // Scope handling mode.
     ScopeMode scopeMode = ScopeMode::Indent;

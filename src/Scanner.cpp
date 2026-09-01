@@ -193,10 +193,15 @@ RawToken Scanner::readPunctuation() {
     const int startLine = line;
     const int startCol = column;
     int count = 0;
-    while (current == ch) {
-        ++count;
-        next();
+    if (commentCfg.collapseDuplicates) {
+        while (current == ch) {
+            ++count;
+            next();
+        }
+    } else {
+        count = 1;
     }
+    
     return RawToken(RawKind::Punctuation, ch, startLine, startCol, count);
 }
 

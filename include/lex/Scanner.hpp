@@ -80,6 +80,7 @@ struct CommentConfig {
     // Consume a comment through its terminator and continue scanning.
     // No Comment* tokens are emitted.
     bool skipComments = false;
+    bool collapseDuplicates = true;
 };
 
 
