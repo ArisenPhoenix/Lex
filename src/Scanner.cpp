@@ -210,8 +210,9 @@ RawToken Scanner::readPunctuation() {
         }
     } else {
         count = 1;
+        next();
     }
-    
+
     return RawToken(RawKind::Punctuation, ch, startLine, startCol, count);
 }
 
