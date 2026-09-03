@@ -177,10 +177,16 @@ RawToken Scanner::readOperator() {
     const int startLine = line;
     const int startCol = column;
     int count = 0;
-    while (current == ch) {
-        ++count;
+    if (commentCfg.collapseDuplicates) {
+        while (current == ch) {
+            ++count;
+            next();
+        }
+    } else {
+        count = 1;
         next();
     }
+    
     return RawToken(RawKind::Operator, ch, startLine, startCol, count);
 }
 
