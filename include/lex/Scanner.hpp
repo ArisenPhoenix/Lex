@@ -35,11 +35,26 @@ enum class RawKind : uint8_t {
     Operator,       // single-char value; identical runs set aux (e.g. '+' aux=2). Compounds are a later pass.
     SpecialChar,    // Anything not clearly an identifier or Operator or Punctuation
     Punctuation,    // single-char value; identical runs set aux (e.g. ':' aux=2, '.' aux=3)
+    Preprocessor,   // a recognized directive keyword (see PreprocessorConfig); classified via ppKind
     Unknown,
     NoOp,
-    
+
     Indent,
     Dedent,
+};
+
+// Classifies a RawKind::Preprocessor token. Lex stays language-agnostic: it
+// only recognizes and buckets directive keywords a consumer configured (see
+// PreprocessorConfig), it never evaluates conditions or decides which branch
+// of an #if/#else is "real" - that policy belongs to the consumer (e.g. a
+// C++-aware tool like DocWriter).
+enum class PreprocessorKind : uint8_t {
+    None,
+    If,     // if / ifdef / ifndef, or whatever the consumer maps to "opens a conditional branch"
+    Elif,
+    Else,
+    Endif,
+    Other,  // recognized directive keyword that isn't part of conditional nesting (e.g. define, include)
 };
 
 struct RawToken {
@@ -48,6 +63,7 @@ struct RawToken {
     int line;
     int column;
     int aux = -1;
+    PreprocessorKind ppKind = PreprocessorKind::None;
 
     RawToken(): kind(RawKind::Unknown), line(-1), column(-1) {}
 
@@ -64,7 +80,7 @@ struct RawToken {
     explicit RawToken(RawKind k, String lx, int l, int c, int a = -1)
     : kind(k), lexeme(std::move(lx)), line(l), column(c), aux(a) {}
 
-    
+
     RawToken(RawKind t): kind(t), line(-1), column(-1) {}
 };
 
@@ -74,6 +90,18 @@ struct CommentPair {
     bool nestable = false; // C/C++ false, some langs true
 };
 
+// A single recognized preprocessor directive keyword, e.g. {"if", PreprocessorKind::If}.
+struct PreprocessorKey {
+    String key;
+    PreprocessorKind kind = PreprocessorKind::Other;
+};
+
+struct PreprocessorConfig {
+    String marker;                  // directive introducer, e.g. "#"; empty means disabled
+    Vector<PreprocessorKey> keys;   // recognized keywords -> classification; unrecognized text after
+                                     // the marker is left for normal tokenization (not a directive)
+};
+
 struct CommentConfig {
     Vector<String> lineStarts;     // "#", "//", ";", "--", ...
     Vector<CommentPair> blockPairs; // { "/*","*/" }, { "{-","-}" }, ...
@@ -81,12 +109,19 @@ struct CommentConfig {
     // No Comment* tokens are emitted.
     bool skipComments = false;
     bool collapseDuplicates = true;
+
+    // Nested here (not a separate Scanner constructor param) so that anything
+    // already carrying a Scanner's CommentConfig - including a Structurizer
+    // via LayoutConfig::scannerConfig - automatically knows the preprocessor
+    // setup too.
+    PreprocessorConfig preprocessor;
 };
 
 
 
 // If you don't already have this:
 const char* rawKindToString(RawKind k);
+const char* preprocessorKindToString(PreprocessorKind k);
 
 // Escape lexeme so newlines/tabs are visible in debug output.
 String escapeLexeme(const String& s);
@@ -182,6 +217,14 @@ private:
     RawToken scanLineComment(const String& startLexeme);
 
     bool tryScanComment();
+
+    // Recognizes commentCfg.preprocessor.marker followed by one of
+    // commentCfg.preprocessor.keys; emits a single RawKind::Preprocessor
+    // token classified via ppKind and leaves the remainder of the line
+    // (condition expression, macro name, etc.) for normal tokenization.
+    // Does nothing (returns false) when preprocessor.marker is empty, or
+    // when the marker is present but not followed by a recognized keyword.
+    bool tryScanPreprocessorDirective();
 };
 
 using RunTimeError = std::runtime_error;

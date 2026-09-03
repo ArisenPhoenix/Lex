@@ -9,7 +9,11 @@ Vector<RawToken> Scanner::scan() {
         if (tryScanComment()) {
             continue;
         }
-        
+
+        if (tryScanPreprocessorDirective()) {
+            continue;
+        }
+
 
         if (isDigit(current)) {
              rawTokens.emplace_back(readNumber());
@@ -478,6 +482,18 @@ bool Scanner::tryScanCommentEnd() {
     return true;
 }
 
+const char* preprocessorKindToString(PreprocessorKind k) {
+    switch (k) {
+        case PreprocessorKind::None:  return "None";
+        case PreprocessorKind::If:    return "If";
+        case PreprocessorKind::Elif:  return "Elif";
+        case PreprocessorKind::Else:  return "Else";
+        case PreprocessorKind::Endif: return "Endif";
+        case PreprocessorKind::Other: return "Other";
+        default: return "<PreprocessorKind?>";
+    }
+}
+
 const char* rawKindToString(RawKind k) {
     switch (k) {
         case RawKind::SOF: return "SOF";
@@ -499,6 +515,7 @@ const char* rawKindToString(RawKind k) {
 
         case RawKind::Operator: return "Operator";
         case RawKind::Punctuation: return "Punctuation";
+        case RawKind::Preprocessor: return "Preprocessor";
         case RawKind::SpecialChar: return "SpecialChar";
         case RawKind::Unknown: return "Unknown";
         case RawKind::NoOp: return "NoOp";
@@ -618,6 +635,34 @@ bool Scanner::tryScanComment() {
     return true;
 }
 
+bool Scanner::tryScanPreprocessorDirective() {
+    const auto& ppCfg = commentCfg.preprocessor;
+    if (ppCfg.marker.empty()) return false;
+    if (!matchAt(position, ppCfg.marker)) return false;
+
+    size_t probe = position + ppCfg.marker.size();
+    while (probe < sourceLength && (source[probe] == ' ' || source[probe] == '\t')) ++probe;
+
+    const size_t keyStart = probe;
+    while (probe < sourceLength && (std::isalpha(static_cast<unsigned char>(source[probe])) || source[probe] == '_')) {
+        ++probe;
+    }
+    const String key = source.substr(keyStart, probe - keyStart);
+
+    for (const auto& entry : ppCfg.keys) {
+        if (entry.key != key) continue;
+
+        const int startLine = line;
+        const int startCol = column;
+        advanceN(probe - position);
+        rawTokens.emplace_back(RawToken(RawKind::Preprocessor, ppCfg.marker + key, startLine, startCol));
+        rawTokens.back().ppKind = entry.kind;
+        return true;
+    }
+
+    return false;
+}
+
 RawToken Scanner::scanLineCommentBody() {
     const int startLine = line;
     const int startCol  = column;
@@ -702,6 +747,10 @@ void printRawTokens(const Vector<RawToken>& toks, std::ostream& os) {
             os << "  aux=" << t.aux;
         }
 
+        if (t.kind == RawKind::Preprocessor) {
+            os << "  ppKind=" << preprocessorKindToString(t.ppKind);
+        }
+
         if (!t.lexeme.empty()) {
             os << "  \"" << escapeLexeme(t.lexeme) << "\"";
         }
@@ -714,6 +763,7 @@ void printRawTokens(const Vector<RawToken>& toks, std::ostream& os) {
 std::ostream& operator<<(std::ostream& os, const RawToken& t) {
     os << rawKindToString(t.kind) << " (" << t.line << ":" << t.column << ")";
     if (t.aux != -1) os << " aux=" << t.aux;
+    if (t.kind == RawKind::Preprocessor) os << " ppKind=" << preprocessorKindToString(t.ppKind);
     if (!t.lexeme.empty()) os << " \"" << escapeLexeme(t.lexeme) << "\"";
     return os;
 }

@@ -30,6 +30,7 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
                 continue;
             }
             if (dropComment(t)) continue;
+            if (dropPreprocessor(t)) continue;
             emit(t);
         }
         if (sawEOF) out.push_back(eofTok);
@@ -54,11 +55,19 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
                 continue;
             }
 
+            if (dropPreprocessor(t)) {
+                continue;
+            }
+
             if (isScopeClose(t)) {
-                if (scopeDepth <= 0) {
+                // Scanner::readPunctuation folds a run of identical closers (e.g. "}}}")
+                // into a single token with aux set to the run length, so a closer here
+                // can account for more than one scope level.
+                const int count = (t.aux > 0 ? t.aux : 1);
+                if (scopeDepth < count) {
                     throw std::runtime_error("Brace scope error: unmatched closing scope token");
                 }
-                scopeDepth--;
+                scopeDepth -= count;
                 out.emplace_back(RawKind::Dedent, "", t.line, t.column, scopeDepth);
                 emit(t);
                 continue;
@@ -67,7 +76,8 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
             emit(t);
 
             if (isScopeOpen(t)) {
-                scopeDepth++;
+                const int count = (t.aux > 0 ? t.aux : 1);
+                scopeDepth += count;
                 out.emplace_back(RawKind::Indent, "", t.line, t.column, scopeDepth);
                 continue;
             }
@@ -127,6 +137,12 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
                 continue;
             }
 
+            if (isPreprocessorToken(t)) {
+                if (!dropPreprocessor(t)) emit(t);
+                atLineStart = false;
+                continue;
+            }
+
             if (parenDepth == 0) {applyIndent(pendingIndent, t, out);}
 
             pendingIndent = 0;
@@ -154,6 +170,10 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
         }
 
         if (dropComment(t)) {
+            continue;
+        }
+
+        if (dropPreprocessor(t)) {
             continue;
         }
 
@@ -193,6 +213,14 @@ bool Structurizer::isCommentToken(const RawToken& t) const {
     default:
         return false;
     }
+}
+
+bool Structurizer::isPreprocessorToken(const RawToken& t) const {
+    return t.kind == RawKind::Preprocessor;
+}
+
+bool Structurizer::dropPreprocessor(const RawToken& t) const {
+    return !cfg_.keepPreprocessor && isPreprocessorToken(t);
 }
 
 bool Structurizer::isScopeOpen(const RawToken& t) const {
