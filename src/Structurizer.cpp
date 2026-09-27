@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "lex/Structurizer.hpp"
 
+#include <algorithm>
+
 Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
     Vector<RawToken> out;
     out.reserve(in.size() + 32);
@@ -98,6 +100,13 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
     int pendingIndent = 0;
 
     int parenDepth = 0;
+    // The previous content token on this line was an indent marker that
+    // indented its content (so a following marker may indent again).
+    bool afterMarker = false;
+    // Inside a text block (scannerConfig.textBlocks): from its opener through
+    // its lines (and closer). Its newlines are line breaks of the text, kept
+    // even inside brackets, and its lines do not indent.
+    bool inTextBlock = false;
 
     for (; i < in.size(); ++i) {
         const RawToken& t = in[i];
@@ -107,8 +116,11 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
             break;
         }
 
-        if (t.kind == RawKind::Punctuation && (t.lexeme == "(" || t.lexeme == "[")) {parenDepth++;}
-        if (t.kind == RawKind::Punctuation && (t.lexeme == ")" || t.lexeme == "]")) parenDepth = std::max(0, parenDepth - 1);
+        parenDepth = std::max(0, parenDepth + bracketDelta(t));
+        if (t.kind == RawKind::TextBlockStart) inTextBlock = true;
+        else if (t.kind != RawKind::TextLine && t.kind != RawKind::Newline && t.kind != RawKind::TextBlockEnd &&
+                 t.kind != RawKind::Space && t.kind != RawKind::Tab && !isCommentToken(t))
+            inTextBlock = false;
 
         if (atLineStart) {
             if (t.kind == RawKind::Space) {
@@ -143,17 +155,29 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
                 continue;
             }
 
+            // A text block's lines (scannerConfig.textBlocks) are raw text:
+            // their indentation is content, not scope.
+            if (inTextBlock && (t.kind == RawKind::TextLine || t.kind == RawKind::TextBlockEnd)) {
+                emit(t);
+                if (t.kind == RawKind::TextBlockEnd) inTextBlock = false;
+                atLineStart = false;
+                continue;
+            }
+
             if (parenDepth == 0) {applyIndent(pendingIndent, t, out);}
 
             pendingIndent = 0;
             atLineStart = false;
 
             emit(t);
+            afterMarker = parenDepth == 0 && applyMarkerIndent(in, i, out);
             continue;
         }
 
+        if (t.kind == RawKind::TextBlockEnd) inTextBlock = false;
+
         if (t.kind == RawKind::Newline) {
-            if (cfg_.parenContinuation && parenDepth > 0) {
+            if (cfg_.parenContinuation && parenDepth > 0 && !inTextBlock) {
                 atLineStart = true;
                 pendingIndent = 0;
                 continue;
@@ -178,6 +202,9 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
         }
 
         emit(t);
+        if (t.kind != RawKind::Space && t.kind != RawKind::Tab) {
+            afterMarker = afterMarker && parenDepth == 0 && applyMarkerIndent(in, i, out);
+        }
     }
 
     int eofLine = sawEOF ? eofTok.line : (in.empty() ? 1 : in.back().line);
@@ -221,6 +248,41 @@ bool Structurizer::isPreprocessorToken(const RawToken& t) const {
 
 bool Structurizer::dropPreprocessor(const RawToken& t) const {
     return !cfg_.keepPreprocessor && isPreprocessorToken(t);
+}
+
+int Structurizer::bracketDelta(const RawToken& t) const {
+    if (t.kind != RawKind::Punctuation) return 0;
+    const int count = (t.aux > 0 ? t.aux : 1);
+    for (const auto& opener : cfg_.bracketOpeners) {
+        if (t.lexeme == opener) return count;
+    }
+    for (const auto& closer : cfg_.bracketClosers) {
+        if (t.lexeme == closer) return -count;
+    }
+    return 0;
+}
+
+bool Structurizer::isIndentMarker(const RawToken& t) const {
+    if (t.aux > 1) return false;  // a collapsed run ("--") is not the marker
+    for (const auto& marker : cfg_.indentMarkers) {
+        if (t.lexeme == marker) return true;
+    }
+    return false;
+}
+
+bool Structurizer::applyMarkerIndent(const Vector<RawToken>& in, size_t i, Vector<RawToken>& out) {
+    if (!isIndentMarker(in[i])) return false;
+    size_t j = i + 1;
+    if (j >= in.size() || (in[j].kind != RawKind::Space && in[j].kind != RawKind::Tab)) return false;
+    while (j < in.size() && (in[j].kind == RawKind::Space || in[j].kind == RawKind::Tab)) ++j;
+    if (j >= in.size()) return false;
+    const RawToken& content = in[j];
+    if (content.kind == RawKind::Newline || content.kind == RawKind::EOF_ || isCommentToken(content)) return false;
+    const int indent = content.column - 1;
+    if (indent <= indentStack_.back()) return false;
+    indentStack_.push_back(indent);
+    out.emplace_back(RawKind::Indent, "", content.line, content.column, indent);
+    return true;
 }
 
 bool Structurizer::isScopeOpen(const RawToken& t) const {

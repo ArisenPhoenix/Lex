@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "lex/Scanner.hpp"
 
+#include <cctype>
+
 Vector<RawToken> Scanner::scan() {
     rawTokens.emplace_back(RawToken(RawKind::SOF));
     while (position < sourceLength) {
@@ -14,13 +16,20 @@ Vector<RawToken> Scanner::scan() {
             continue;
         }
 
+        if (tryScanTextBlock()) {
+            continue;
+        }
+
 
         if (isDigit(current)) {
              rawTokens.emplace_back(readNumber());
              continue;
         }
 
-        if (isTextBegin(current)) {
+        // A quote directly after a word character is part of that text, not
+        // an opening delimiter: prose (op's), primes (x'). It is left as an
+        // Unknown token for the consumer.
+        if (isTextBegin(current) && !followsWordChar()) {
             rawTokens.emplace_back(readText());
             continue;
         }
@@ -148,6 +157,12 @@ bool Scanner::isPunctuation(char c) {
 
 bool Scanner::isTextBegin(char c) {
     return c == '\'' || c == '"' || c == '`';
+}
+
+bool Scanner::followsWordChar() const {
+    if (position == 0) return false;
+    const unsigned char prev = static_cast<unsigned char>(source[position - 1]);
+    return std::isalnum(prev) || prev == '_';
 }
 
 bool Scanner::isLetter(char c) {
@@ -289,14 +304,14 @@ RawToken Scanner::readText() {
                     }
                     break;
             }
-            next();
+            step();  // a line continuation passes a newline
             continue;
 
         } else {
             result += current;
         }
 
-        next();
+        step();
     }
 
     if (hasNext() && current != startChar) {
@@ -393,6 +408,127 @@ bool Scanner::tryScanCommentDelimiter() {
 }
  
 bool Scanner::inBounds(size_t pos) const { return pos < sourceLength; }
+
+void Scanner::step() {
+    const bool newline = current == '\n';
+    next();
+    if (newline) {
+        line++;
+        column = 1;
+    }
+}
+
+int Scanner::lineIndent(size_t pos) const {
+    size_t start = pos;
+    while (start > 0 && source[start - 1] != '\n') --start;
+    int indent = 0;
+    while (start + indent < sourceLength && (source[start + indent] == ' ' || source[start + indent] == '\t')) ++indent;
+    return indent;
+}
+
+const TextBlockConfig* Scanner::matchTextBlock() const {
+    const TextBlockConfig* best = nullptr;
+    for (const auto& block : commentCfg.textBlocks) {
+        if (!matchAt(position, block.opener)) continue;
+        if (best && block.opener.size() <= best->opener.size()) continue;
+        if (block.endsLine) {
+            if (position > 0 && source[position - 1] != ' ' && source[position - 1] != '\t' &&
+                source[position - 1] != '\n') continue;
+            size_t after = position + block.opener.size();
+            while (after < sourceLength && (source[after] == ' ' || source[after] == '\t' || source[after] == '\r')) ++after;
+            bool comment = false;
+            for (const auto& start : commentCfg.lineStarts)
+                comment = comment || (after > position + block.opener.size() && matchAt(after, start));
+            if (after < sourceLength && source[after] != '\n' && !comment) continue;
+        }
+        best = &block;
+    }
+    return best;
+}
+
+bool Scanner::tryScanTextBlock() {
+    const TextBlockConfig* block = matchTextBlock();
+    if (!block) return false;
+    const int openerIndent = lineIndent(position);
+    rawTokens.emplace_back(RawKind::TextBlockStart, block->opener, line, column);
+    advanceN(block->opener.size());
+    if (block->closer.empty()) scanIndentedText(openerIndent);
+    else scanDelimitedText(block->closer);
+    return true;
+}
+
+// The rest of the opener's line (whitespace, a comment), then each following
+// line indented deeper than the opener's line as a TextLine. Blank lines
+// inside the block are Newline counts; the newline after the last text line,
+// and anything after it, is left to normal scanning.
+void Scanner::scanIndentedText(int openerIndent) {
+    while (current == ' ' || current == '\t' || current == '\r') next();
+    tryScanComment();
+
+    struct Line { size_t begin, end; };
+    Vector<Line> lines;
+    size_t at = position;  // a newline (or the end)
+    while (at < sourceLength && source[at] == '\n') {
+        size_t begin = at + 1;
+        int indent = 0;
+        while (begin < sourceLength && (source[begin] == ' ' || source[begin] == '\t')) { ++begin; ++indent; }
+        if (begin >= sourceLength) break;
+        if (source[begin] == '\n' || source[begin] == '\r') {  // blank: part of the block if text follows
+            at = source[begin] == '\r' ? begin + 1 : begin;
+            continue;
+        }
+        if (indent <= openerIndent) break;
+        size_t end = begin;
+        while (end < sourceLength && source[end] != '\n') ++end;
+        lines.push_back({begin, end});
+        at = end;
+    }
+
+    for (const auto& text : lines) {
+        const int nlLine = line, nlColumn = column;
+        int newlines = 0;
+        while (position < text.begin) {
+            if (current == '\n') ++newlines;
+            step();
+        }
+        rawTokens.emplace_back(RawKind::Newline, "\n", nlLine, nlColumn, newlines);
+        size_t end = text.end;
+        if (end > text.begin && source[end - 1] == '\r') --end;
+        rawTokens.emplace_back(RawKind::TextLine, source.substr(text.begin, end - text.begin), line, column);
+        while (position < text.end) step();
+    }
+}
+
+// Everything up to `closer`, one TextLine per line segment (an empty segment
+// is only its Newline), then the closer as TextBlockEnd.
+void Scanner::scanDelimitedText(const String& closer) {
+    const int startLine = line, startColumn = column;
+    size_t begin = position;
+    int segLine = line, segColumn = column;
+    while (true) {
+        if (position >= sourceLength) throw ScannerError("Unclosed text block, expected " + closer, startLine, startColumn);
+        const bool closing = matchAt(position, closer);
+        if (closing || current == '\n') {
+            size_t end = position;
+            if (end > begin && source[end - 1] == '\r') --end;
+            if (end > begin) rawTokens.emplace_back(RawKind::TextLine, source.substr(begin, end - begin), segLine, segColumn);
+            if (closing) {
+                rawTokens.emplace_back(RawKind::TextBlockEnd, closer, line, column);
+                advanceN(closer.size());
+                return;
+            }
+            const int nlLine = line, nlColumn = column;
+            int newlines = 0;
+            while (current == '\n') { ++newlines; step(); }
+            rawTokens.emplace_back(RawKind::Newline, "\n", nlLine, nlColumn, newlines);
+            begin = position;
+            segLine = line;
+            segColumn = column;
+            continue;
+        }
+        step();
+    }
+}
 
 bool Scanner::matchAt(size_t pos, const String& s) const {
     if (s.empty()) {return false;}
@@ -523,6 +659,9 @@ const char* rawKindToString(RawKind k) {
         case RawKind::Comment: return "Comment";
         case RawKind::Indent: return "Indent";
         case RawKind::Dedent: return "Dedent";
+        case RawKind::TextBlockStart: return "TextBlockStart";
+        case RawKind::TextLine: return "TextLine";
+        case RawKind::TextBlockEnd: return "TextBlockEnd";
         default: return "<RawKind?>";
     }
 }

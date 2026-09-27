@@ -41,6 +41,14 @@ enum class RawKind : uint8_t {
 
     Indent,
     Dedent,
+
+    // Text blocks (see TextBlockConfig): the opener, one TextLine per line
+    // of raw text, and the closer when the block has one. Consecutive
+    // TextLines belong together; the Newline tokens between them carry the
+    // line breaks (aux counts blank lines).
+    TextBlockStart,
+    TextLine,
+    TextBlockEnd,
 };
 
 // Classifies a RawKind::Preprocessor token. Lex stays language-agnostic: it
@@ -102,6 +110,21 @@ struct PreprocessorConfig {
                                      // the marker is left for normal tokenization (not a directive)
 };
 
+// A marker that switches the scanner to raw text lines: the lines it covers
+// are not tokenized (quotes, brackets and comment starts are text), and each
+// line is one RawKind::TextLine. What the text means (joining, folding,
+// indentation) is the consumer's.
+struct TextBlockConfig {
+    String opener;          // e.g. """, or YAML's > and |
+    // The block ends at `closer`. Empty: the block is the following lines
+    // indented deeper than the opener's line (blank lines included), and
+    // ends before the first line that is not.
+    String closer;
+    // The opener stands alone at the end of its line: after whitespace, and
+    // followed only by whitespace or a line comment.
+    bool endsLine = false;
+};
+
 struct CommentConfig {
     Vector<String> lineStarts;     // "#", "//", ";", "--", ...
     Vector<CommentPair> blockPairs; // { "/*","*/" }, { "{-","-}" }, ...
@@ -115,6 +138,10 @@ struct CommentConfig {
     // via LayoutConfig::scannerConfig - automatically knows the preprocessor
     // setup too.
     PreprocessorConfig preprocessor;
+
+    // Nested here for the same reason: the Structurizer reads this config
+    // and passes text lines through without applying indentation to them.
+    Vector<TextBlockConfig> textBlocks;
 };
 
 
@@ -159,6 +186,8 @@ public:
     bool isWhiteSpace(char);
     bool isDigit(char);
     bool isTextBegin(char);
+    // The character before the current one is a letter, digit or '_'.
+    bool followsWordChar() const;
     bool isOperator(char);
 
     bool isCommentBegin(char);
@@ -225,6 +254,16 @@ private:
     // Does nothing (returns false) when preprocessor.marker is empty, or
     // when the marker is present but not followed by a recognized keyword.
     bool tryScanPreprocessorDirective();
+
+    // One character forward, counting a newline it passes.
+    void step();
+    // The configured text block opening here, if any (the longest opener).
+    const TextBlockConfig* matchTextBlock() const;
+    bool tryScanTextBlock();
+    void scanIndentedText(int openerIndent);
+    void scanDelimitedText(const String& closer);
+    // Spaces and tabs before the first character of the line holding `pos`.
+    int lineIndent(size_t pos) const;
 };
 
 using RunTimeError = std::runtime_error;

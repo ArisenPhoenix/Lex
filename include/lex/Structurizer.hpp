@@ -59,6 +59,26 @@ struct LayoutConfig {
     Vector<String> scopeOpeners = {"{"};
     Vector<String> scopeClosers = {"}"};
 
+    // Used when scopeMode == Indent: brackets whose contents continue across
+    // newlines (see parenContinuation). A collapsed run (e.g. "]]", aux=2)
+    // counts once per character.
+    Vector<String> bracketOpeners = {"(", "[", "{"};
+    Vector<String> bracketClosers = {")", "]", "}"};
+
+    // Used when scopeMode == Indent: a marker that opens a line, followed by
+    // whitespace and content, also indents that content to its own column,
+    // e.g. YAML's "- " (the lines of a list item align with its first key):
+    //
+    //   - name: x      -> '-' Indent(2) name ...
+    //     bits: 3      -> (still at 2)
+    //   - name: y      -> Dedent '-' Indent(2) name ...
+    //
+    // Markers may repeat on a line ("- - x"). A marker followed by a newline
+    // or comment indents nothing; its content indents as usual. Columns are
+    // counted in characters, so markers assume space indentation. Empty by
+    // default.
+    Vector<String> indentMarkers;
+
     // The config of the Scanner that produced the RawTokens this Structurizer
     // will process. Structurizer depends on Scanner's output, so it needs to
     // know things like comment delimiters and whether identical-run collapsing
@@ -92,6 +112,11 @@ private:
     bool isPreprocessorToken(const RawToken& t) const;
     bool isScopeOpen(const RawToken& t) const;
     bool isScopeClose(const RawToken& t) const;
+    int bracketDelta(const RawToken& t) const;
+    bool isIndentMarker(const RawToken& t) const;
+    // At an indent marker in[i]: when whitespace and content follow on the
+    // same line, pushes the content's column as an indent and returns true.
+    bool applyMarkerIndent(const Vector<RawToken>& in, size_t i, Vector<RawToken>& out);
     bool dropWhitespace() const;
     bool dropComment(const RawToken& t) const;
     bool dropPreprocessor(const RawToken& t) const;
