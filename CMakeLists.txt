@@ -10,6 +10,7 @@ include(CMakePackageConfigHelpers)
 
 option(LEX_BUILD_SHARED "Build Lex as a shared library" OFF)
 option(LEX_BUILD_EXAMPLES "Build Lex examples" OFF)
+option(LEX_BUILD_TESTS "Build Lex regression tests" OFF)
 
 set(LEX_HEADERS
   ${CMAKE_CURRENT_SOURCE_DIR}/include/lex/Scanner.hpp
@@ -50,6 +51,14 @@ endif()
 
 if(LEX_BUILD_EXAMPLES)
   message(STATUS "LEX_BUILD_EXAMPLES is ON, but no examples are defined yet")
+endif()
+
+if(LEX_BUILD_TESTS)
+  enable_testing()
+  add_executable(lex_scanner_test tests/ScannerTest.cpp)
+  target_link_libraries(lex_scanner_test PRIVATE Lex::lex)
+  target_compile_features(lex_scanner_test PRIVATE cxx_std_20)
+  add_test(NAME lex_scanner_test COMMAND lex_scanner_test)
 endif()
 
 install(TARGETS lex

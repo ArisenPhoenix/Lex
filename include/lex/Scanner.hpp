@@ -141,6 +141,18 @@ struct QuoteConfig {
     bool doubled = false;
 };
 
+// A word written directly before a quote with optional reading rules:
+// Python's r"", b"", C++'s L"", u8"". A configured prefix also permits a quote
+// after a word when quotesNeedWordBoundary is enabled. The prefix stays an
+// Identifier token directly before the text token.
+struct StringPrefix {
+    String prefix;
+    // How the text after this prefix is read (its `quote` is ignored); unset,
+    // as its quote reads without a prefix. Python's r"\d": raw, escapes on.
+    bool hasReading = false;
+    QuoteConfig reading;
+};
+
 struct CommentConfig {
     Vector<String> lineStarts;     // "#", "//", ";", "--", ...
     // A line comment starts only at the beginning of a line or after
@@ -166,6 +178,15 @@ struct CommentConfig {
     // Per-quote reading rules (see QuoteConfig); unlisted quotes decode C
     // escapes.
     Vector<QuoteConfig> quotes;
+
+    // Words that may prefix a quote (see StringPrefix). Matched whole and
+    // case-sensitively: list "F" and "Rb" too where the language allows them.
+    Vector<StringPrefix> stringPrefixes;
+
+    // Treat a quote immediately after a letter, digit or '_' as plain text
+    // (op's, x'), unless a stringPrefix matches. Opt in for prose/YAML;
+    // normal code recognizes quotes after identifiers without a prefix list.
+    bool quotesNeedWordBoundary = false;
 };
 
 
@@ -212,6 +233,9 @@ public:
     bool isTextBegin(char);
     // The character before the current one is a letter, digit or '_'.
     bool followsWordChar() const;
+    // The configured prefix that is the whole word directly before the quote
+    // at `position`, if any.
+    const StringPrefix* stringPrefixBefore() const;
     bool isOperator(char);
 
     bool isCommentBegin(char);
@@ -221,7 +245,8 @@ public:
 
     RawToken readIdentifier();
     RawToken readNumber();
-    RawToken readText();
+    // `reading` overrides the quote's QuoteConfig (a string prefix's).
+    RawToken readText(const QuoteConfig* reading = nullptr);
 
     RawToken readPunctuation();
     bool handleSpecialChar(char nextChar, char startChar, String& resultAccum);

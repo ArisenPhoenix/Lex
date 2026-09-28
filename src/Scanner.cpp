@@ -2,6 +2,7 @@
 #include "lex/Scanner.hpp"
 
 #include <cctype>
+#include <string_view>
 
 Vector<RawToken> Scanner::scan() {
     rawTokens.emplace_back(RawToken(RawKind::SOF));
@@ -26,12 +27,13 @@ Vector<RawToken> Scanner::scan() {
              continue;
         }
 
-        // A quote directly after a word character is part of that text, not
-        // an opening delimiter: prose (op's), primes (x'). It is left as an
-        // Unknown token for the consumer.
-        if (isTextBegin(current) && !followsWordChar()) {
-            rawTokens.emplace_back(readText());
-            continue;
+        if (isTextBegin(current)) {
+            const StringPrefix* prefix = stringPrefixBefore();
+            if (!commentCfg.quotesNeedWordBoundary || !followsWordChar() || prefix) {
+                rawTokens.emplace_back(readText(prefix && prefix->hasReading ? &prefix->reading : nullptr));
+                continue;
+            }
+            // Embedded quotes in prose remain Unknown tokens for the consumer.
         }
 
 
@@ -244,7 +246,21 @@ RawToken Scanner::readPunctuation() {
     return RawToken(RawKind::Punctuation, ch, startLine, startCol, count);
 }
 
-RawToken Scanner::readText() {
+const StringPrefix* Scanner::stringPrefixBefore() const {
+    if (commentCfg.stringPrefixes.empty()) return nullptr;
+    auto word = [&](size_t i) {
+        const unsigned char c = static_cast<unsigned char>(source[i]);
+        return std::isalnum(c) || c == '_';
+    };
+    size_t start = position;
+    while (start > 0 && word(start - 1)) --start;
+    const std::string_view before(source.data() + start, position - start);
+    for (const auto& p : commentCfg.stringPrefixes)
+        if (before == p.prefix) return &p;
+    return nullptr;
+}
+
+RawToken Scanner::readText(const QuoteConfig* reading) {
     if (!isTextBegin(current)) { throw ScannerError("Not Text in readText -> " + std::to_string(current), line, column); }
 
     char startChar = current;
@@ -252,7 +268,7 @@ RawToken Scanner::readText() {
     int startLine = line;
     String result;
     RawKind type = current == '\'' ? RawKind::Char : current == '"' ? RawKind::String : RawKind::Text;
-    const QuoteConfig* quote = quoteConfig(startChar);
+    const QuoteConfig* quote = reading ? reading : quoteConfig(startChar);
     const bool raw = quote && quote->raw;
     const bool escapes = !quote || quote->escapes;
     const bool doubled = quote && quote->doubled;

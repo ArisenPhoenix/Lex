@@ -116,6 +116,10 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
             break;
         }
 
+        // Whether a line continues inside brackets is decided by the depth
+        // before its first token: a line opening with '{' still starts at
+        // depth 0 (and indents), one opening with ')' is still inside.
+        const int depthBefore = parenDepth;
         parenDepth = std::max(0, parenDepth + bracketDelta(t));
         if (t.kind == RawKind::TextBlockStart) inTextBlock = true;
         else if (t.kind != RawKind::TextLine && t.kind != RawKind::Newline && t.kind != RawKind::TextBlockEnd &&
@@ -164,7 +168,7 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
                 continue;
             }
 
-            if (parenDepth == 0) {applyIndent(pendingIndent, t, out);}
+            if (depthBefore == 0) {applyIndent(pendingIndent, t, out);}
 
             pendingIndent = 0;
             atLineStart = false;
