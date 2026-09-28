@@ -125,8 +125,28 @@ struct TextBlockConfig {
     bool endsLine = false;
 };
 
+// How one quote character's text is read. A quote with no QuoteConfig decodes
+// C escapes (\n, \x41, \101, ...) and rejects unknown ones.
+struct QuoteConfig {
+    char quote = '"';
+    // Keep the text exactly as written, escapes and doubled quotes included,
+    // for a consumer that decodes it by its own language's rules (YAML's \u,
+    // \U, folded line breaks). Lex only finds where the text ends.
+    bool raw = false;
+    // A backslash escapes the next character, so it cannot close the quote.
+    // Off: a backslash is an ordinary character (shell and YAML single quotes).
+    bool escapes = true;
+    // Two quotes in a row stand for one quote character inside the text
+    // (SQL, YAML single quotes) instead of closing it.
+    bool doubled = false;
+};
+
 struct CommentConfig {
     Vector<String> lineStarts;     // "#", "//", ";", "--", ...
+    // A line comment starts only at the beginning of a line or after
+    // whitespace, so a marker inside a word is text: YAML's and shell's
+    // `url#frag`, `a#b`.
+    bool lineStartsNeedSpace = false;
     Vector<CommentPair> blockPairs; // { "/*","*/" }, { "{-","-}" }, ...
     // Consume a comment through its terminator and continue scanning.
     // No Comment* tokens are emitted.
@@ -142,6 +162,10 @@ struct CommentConfig {
     // Nested here for the same reason: the Structurizer reads this config
     // and passes text lines through without applying indentation to them.
     Vector<TextBlockConfig> textBlocks;
+
+    // Per-quote reading rules (see QuoteConfig); unlisted quotes decode C
+    // escapes.
+    Vector<QuoteConfig> quotes;
 };
 
 
@@ -257,6 +281,13 @@ private:
 
     // One character forward, counting a newline it passes.
     void step();
+    // At a line end: "\n", or the "\r" of a "\r\n".
+    bool atLineEnd() const;
+    // A line comment marker may start here (see lineStartsNeedSpace).
+    bool lineCommentMayStart() const;
+    // Where the text starts: past a byte-order mark, if any.
+    size_t textBegin = 0;
+    const QuoteConfig* quoteConfig(char quote) const;
     // The configured text block opening here, if any (the longest opener).
     const TextBlockConfig* matchTextBlock() const;
     bool tryScanTextBlock();

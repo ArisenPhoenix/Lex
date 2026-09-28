@@ -68,6 +68,9 @@ Scanner::Scanner(String src, CommentConfig cfg)
     : source(std::move(src)), commentCfg(std::move(cfg)) {
     sourceLength = source.size();
     current = (sourceLength > 0) ? source[0] : '\0';
+    // A UTF-8 byte-order mark is not text. Columns stay byte offsets, so the
+    // first token after it is at column 4.
+    if (source.compare(0, 3, "\xEF\xBB\xBF") == 0) advanceN(textBegin = 3);
 }
 
 Scanner::Scanner(const char* src, const CommentConfig& cfg) : Scanner(String(src), cfg) {}
@@ -96,21 +99,31 @@ bool Scanner::isDigit(char c) {
 }
 
 void Scanner::handleWhiteSpace() {
-    while (isWhiteSpace(current) && hasNext()) {
+    while ((isWhiteSpace(current) || atLineEnd()) && hasNext()) {
         int startLine = line;
         int startCol = column;
-        if (current == '\n') {
+        if (atLineEnd()) {
+            // "\r\n" is one line end.
             int numNewLines = 0;
-            while (current == '\n') { ++numNewLines; line++; column = 0; next(); }
-            rawTokens.emplace_back(RawKind::Newline, "\n", startLine, startCol, numNewLines);            
+            while (atLineEnd()) {
+                if (current == '\r') next();
+                ++numNewLines; line++; column = 0; next();
+            }
+            rawTokens.emplace_back(RawKind::Newline, "\n", startLine, startCol, numNewLines);
         }
+        // Each run is where it starts, not where the loop pass started (a
+        // tab after a line break is on the next line).
         if (current == '\t') {
+            startLine = line;
+            startCol = column;
             int numTabs = 0;
             while (current == '\t') { ++numTabs; next(); }
             rawTokens.emplace_back(RawToken(RawKind::Tab, "    ", startLine, startCol, numTabs));
         }
-        
+
         if (current == ' ') {
+            startLine = line;
+            startCol = column;
             int numSpaces = 0;
             while (current == ' ') { ++numSpaces; next(); }
             rawTokens.emplace_back(RawToken(RawKind::Space, " ", startLine, startCol, numSpaces));
@@ -239,10 +252,32 @@ RawToken Scanner::readText() {
     int startLine = line;
     String result;
     RawKind type = current == '\'' ? RawKind::Char : current == '"' ? RawKind::String : RawKind::Text;
+    const QuoteConfig* quote = quoteConfig(startChar);
+    const bool raw = quote && quote->raw;
+    const bool escapes = !quote || quote->escapes;
+    const bool doubled = quote && quote->doubled;
     next();
 
-    while (hasNext() && current != startChar) {
-        if (current == '\\') {
+    while (hasNext()) {
+        if (current == startChar) {
+            if (!doubled || position + 1 >= sourceLength || source[position + 1] != startChar) break;
+            // A doubled quote is one quote character of the text.
+            result += startChar;
+            if (raw) result += startChar;
+            next();
+            next();
+            continue;
+        }
+        if (current == '\\' && escapes && raw) {
+            // Kept as written; the escaped character cannot close the text.
+            result += current;
+            step();
+            if (!hasNext()) throw ScannerError("Unfinished escape sequence in string literal", line, column);
+            result += current;
+            step();
+            continue;
+        }
+        if (current == '\\' && escapes) {
             if (!hasNext()) {
                 throw ScannerError("Unfinished escape sequence in string literal", line, column);
             }
@@ -314,7 +349,7 @@ RawToken Scanner::readText() {
         step();
     }
 
-    if (hasNext() && current != startChar) {
+    if (hasNext() && current != startChar) { // will need to use a current check on hasNext() or just remove it
         throw ScannerError("Unmatched quote for " + std::to_string(startChar), line, column);
     }
 
@@ -416,6 +451,22 @@ void Scanner::step() {
         line++;
         column = 1;
     }
+}
+
+bool Scanner::atLineEnd() const {
+    return current == '\n' || (current == '\r' && position + 1 < sourceLength && source[position + 1] == '\n');
+}
+
+bool Scanner::lineCommentMayStart() const {
+    if (!commentCfg.lineStartsNeedSpace || position == textBegin) return true;
+    const char prev = source[position - 1];
+    return prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r';
+}
+
+const QuoteConfig* Scanner::quoteConfig(char quote) const {
+    for (const auto& q : commentCfg.quotes)
+        if (q.quote == quote) return &q;
+    return nullptr;
 }
 
 int Scanner::lineIndent(size_t pos) const {
@@ -557,8 +608,9 @@ bool Scanner::tryScanCommentStart() {
     String bestLexeme;
 
     // 1) Line starts
+    const bool lineMayStart = lineCommentMayStart();
     for (const auto& ls : commentCfg.lineStarts) {
-        if (ls.size() >= bestLen && matchAt(position, ls)) {
+        if (lineMayStart && ls.size() >= bestLen && matchAt(position, ls)) {
             // Longest match wins; if equal length, line vs block tie-break is arbitrary.
             bestKind = StartKind::Line;
             bestLen = ls.size();
@@ -716,7 +768,7 @@ RawToken Scanner::scanLineComment(const String& startLexeme) {
     advanceN(startLexeme.size());
 
     String text;
-    while (position < sourceLength && current != '\n') {
+    while (position < sourceLength && !atLineEnd()) {
         text += current;
         next();
     }
@@ -734,8 +786,9 @@ bool Scanner::tryScanComment() {
     int bestBlockIndex = -1;
     String bestLexeme;
 
+    const bool lineMayStart = lineCommentMayStart();
     for (const auto& ls : commentCfg.lineStarts) {
-        if (matchAt(position, ls) && ls.size() > bestLen) {
+        if (lineMayStart && matchAt(position, ls) && ls.size() > bestLen) {
             bestKind = StartKind::Line;
             bestLen = ls.size();
             bestLexeme = ls;
@@ -808,7 +861,7 @@ RawToken Scanner::scanLineCommentBody() {
     const int startCol  = column;
 
     String text;
-    while (position < sourceLength && current != '\n') {
+    while (position < sourceLength && !atLineEnd()) {
         text += current;
         next();
     }
