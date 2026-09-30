@@ -2,53 +2,160 @@
 #include "lex/Scanner.hpp"
 
 #include <cctype>
+#include <algorithm>
+#include <optional>
 #include <string_view>
 
+namespace {
+enum CharFlags : uint16_t {
+    IdentifierStart = 1 << 0,
+    IdentifierPart = 1 << 1,
+    Digit = 1 << 2,
+    Operator = 1 << 3,
+    Punctuation = 1 << 4,
+    Quote = 1 << 5,
+    CommentStart = 1 << 6,
+    PreprocessorStart = 1 << 7,
+    TextBlockStart = 1 << 8,
+};
+
+constexpr auto basicClassifications = [] {
+    std::array<uint16_t, 256> table{};
+    for (unsigned char c : std::string_view("+-*/%=<>&|!")) table[c] |= Operator;
+    for (unsigned char c : std::string_view(":;.,$@?()[]{}#")) table[c] |= Punctuation;
+    for (unsigned char c : std::string_view("'\"`")) table[c] |= Quote;
+    table['_'] |= IdentifierStart | IdentifierPart;
+    return table;
+}();
+
+auto classifyCharacters(const CommentConfig& config) {
+    auto table = basicClassifications;
+    // Match isLetter() in the current C locale, including high bytes. Build
+    // afresh for each scan so locale and public config changes are respected.
+    for (unsigned c = 0; c < table.size(); ++c) {
+        if (std::isalpha(c)) table[c] |= IdentifierStart | IdentifierPart;
+        if (std::isdigit(c)) table[c] |= Digit | IdentifierPart;
+    }
+    auto markStart = [&](const String& delimiter, CharFlags flag) {
+        if (!delimiter.empty()) table[static_cast<unsigned char>(delimiter.front())] |= flag;
+    };
+    for (const auto& start : config.lineStarts) markStart(start, CommentStart);
+    for (const auto& pair : config.blockPairs) markStart(pair.start, CommentStart);
+    markStart(config.preprocessor.marker, PreprocessorStart);
+    for (const auto& block : config.textBlocks) markStart(block.opener, TextBlockStart);
+    return table;
+}
+}
+
 Vector<RawToken> Scanner::scan() {
-    rawTokens.emplace_back(RawToken(RawKind::SOF));
+    if (streamOnly_) throw std::logic_error("Default-constructed Scanner requires stream(source)");
+    scanTokens();
+    return rawTokens;
+}
+
+Scanner::Scanner() : streamOnly_(true) {}
+
+Vector<IndexedToken> Scanner::stream(std::string_view src) {
+    if (!streamOnly_) throw std::logic_error("stream(source) requires a default-constructed Scanner");
+    Vector<IndexedToken> tokens;
+    streamSource_ = src;
+    indexedOutput_ = &tokens;
+    position = 0;
+    sourceLength = src.size();
+    current = src.empty() ? '\0' : src.front();
+    line = column = 1;
+    textBegin = 0;
+    auto releaseSource = [&] {
+        streamSource_ = {};
+        indexedOutput_ = nullptr;
+        position = sourceLength = textBegin = 0;
+        current = '\0';
+        line = column = 1;
+    };
+    try {
+        if (src.substr(0, 3) == "\xEF\xBB\xBF") advanceN(textBegin = 3);
+        scanTokens();
+    } catch (...) {
+        releaseSource();
+        throw;
+    }
+    releaseSource();
+    return tokens;
+}
+
+template <typename MakeLexeme>
+void Scanner::emit(RawKind kind, size_t offset, size_t length, int atLine, int atColumn, int aux,
+                   MakeLexeme&& makeLexeme, PreprocessorKind ppKind) {
+    if (indexedOutput_) {
+        indexedOutput_->emplace_back(offset, length, atLine, atColumn, aux, kind, ppKind);
+    } else {
+        rawTokens.emplace_back(kind, makeLexeme(), atLine, atColumn, aux);
+        rawTokens.back().ppKind = ppKind;
+    }
+}
+
+void Scanner::emitRange(RawKind kind, size_t offset, size_t length, int atLine, int atColumn, int aux) {
+    emit(kind, offset, length, atLine, atColumn, aux,
+         [&] { return String(input().substr(offset, length)); });
+}
+
+void Scanner::scanTokens() {
+    const auto classifications = classifyCharacters(commentCfg);
+    emitRange(RawKind::SOF, 0, 0, -1, -1);
     while (position < sourceLength) {
         
         handleWhiteSpace();
-        if (tryScanComment()) {
+        const auto flags = classifications[static_cast<unsigned char>(current)];
+        if ((flags & CommentStart) && tryScanComment()) {
             continue;
         }
 
-        if (tryScanPreprocessorDirective()) {
+        if ((flags & PreprocessorStart) && tryScanPreprocessorDirective()) {
             continue;
         }
 
-        if (tryScanTextBlock()) {
+        if ((flags & TextBlockStart) && tryScanTextBlock()) {
             continue;
         }
 
+        const size_t begin = position;
+        const int startLine = line, startColumn = column;
 
-        if (isDigit(current)) {
-             rawTokens.emplace_back(readNumber());
+        if (flags & Digit) {
+             consumeNumber();
+             emitRange(RawKind::Number, begin, position - begin, startLine, startColumn);
              continue;
         }
 
-        if (isTextBegin(current)) {
+        if (flags & Quote) {
             const StringPrefix* prefix = stringPrefixBefore();
             if (!commentCfg.quotesNeedWordBoundary || !followsWordChar() || prefix) {
-                rawTokens.emplace_back(readText(prefix && prefix->hasReading ? &prefix->reading : nullptr));
+                scanText(prefix && prefix->hasReading ? &prefix->reading : nullptr);
                 continue;
             }
             // Embedded quotes in prose remain Unknown tokens for the consumer.
         }
 
 
-        if (isOperator(current)) {
-            rawTokens.emplace_back(readOperator());
+        if (flags & Operator) {
+            const char ch = current;
+            const int count = consumeRun();
+            emit(RawKind::Operator, begin, position - begin, startLine, startColumn, count,
+                 [ch] { return String(1, ch); });
             continue;
         }
 
-        if (isPunctuation(current)) {
-            rawTokens.emplace_back(readPunctuation());
+        if (flags & Punctuation) {
+            const char ch = current;
+            const int count = consumeRun();
+            emit(RawKind::Punctuation, begin, position - begin, startLine, startColumn, count,
+                 [ch] { return String(1, ch); });
             continue;
         }
 
-        if (isLetter(current)) {
-            rawTokens.emplace_back(readIdentifier());
+        if (flags & IdentifierStart) {
+            consumeIdentifier(&classifications);
+            emitRange(RawKind::Identifier, begin, position - begin, startLine, startColumn);
             continue;
 
         }
@@ -56,14 +163,12 @@ Vector<RawToken> Scanner::scan() {
         if (!hasNext()) {
             break;
         }
-        rawTokens.emplace_back( RawToken(RawKind::Unknown, String(1, current), line, column));
+        emitRange(RawKind::Unknown, position, 1, line, column);
         advanceN(1);
         
     }
 
-    String eof = "EOF";
-    rawTokens.emplace_back(RawToken(RawKind::EOF_, eof, line, column));
-    return rawTokens;
+    emit(RawKind::EOF_, sourceLength, 0, line, column, -1, [] { return String("EOF"); });
 }
 
 Scanner::Scanner(String src, CommentConfig cfg)
@@ -85,7 +190,7 @@ char Scanner::next() {
         return current;
     }
     position++;
-    current = source[position];
+    current = input()[position];
     return current;
 }
 
@@ -105,30 +210,36 @@ void Scanner::handleWhiteSpace() {
         int startLine = line;
         int startCol = column;
         if (atLineEnd()) {
+            const size_t begin = position;
             // "\r\n" is one line end.
             int numNewLines = 0;
             while (atLineEnd()) {
                 if (current == '\r') next();
                 ++numNewLines; line++; column = 0; next();
             }
-            rawTokens.emplace_back(RawKind::Newline, "\n", startLine, startCol, numNewLines);
+            emit(RawKind::Newline, begin, position - begin, startLine, startCol, numNewLines,
+                 [] { return String("\n"); });
         }
         // Each run is where it starts, not where the loop pass started (a
         // tab after a line break is on the next line).
         if (current == '\t') {
+            const size_t begin = position;
             startLine = line;
             startCol = column;
             int numTabs = 0;
             while (current == '\t') { ++numTabs; next(); }
-            rawTokens.emplace_back(RawToken(RawKind::Tab, "    ", startLine, startCol, numTabs));
+            emit(RawKind::Tab, begin, position - begin, startLine, startCol, numTabs,
+                 [] { return String("    "); });
         }
 
         if (current == ' ') {
+            const size_t begin = position;
             startLine = line;
             startCol = column;
             int numSpaces = 0;
             while (current == ' ') { ++numSpaces; next(); }
-            rawTokens.emplace_back(RawToken(RawKind::Space, " ", startLine, startCol, numSpaces));
+            emit(RawKind::Space, begin, position - begin, startLine, startCol, numSpaces,
+                 [] { return String(" "); });
             continue;
         }
 
@@ -176,7 +287,7 @@ bool Scanner::isTextBegin(char c) {
 
 bool Scanner::followsWordChar() const {
     if (position == 0) return false;
-    const unsigned char prev = static_cast<unsigned char>(source[position - 1]);
+    const unsigned char prev = static_cast<unsigned char>(input()[position - 1]);
     return std::isalnum(prev) || prev == '_';
 }
 
@@ -210,16 +321,7 @@ RawToken Scanner::readOperator() {
     const char ch = current;
     const int startLine = line;
     const int startCol = column;
-    int count = 0;
-    if (commentCfg.collapseDuplicates) {
-        while (current == ch) {
-            ++count;
-            next();
-        }
-    } else {
-        count = 1;
-        next();
-    }
+    const int count = consumeRun();
     
     return RawToken(RawKind::Operator, ch, startLine, startCol, count);
 }
@@ -232,6 +334,12 @@ RawToken Scanner::readPunctuation() {
     const char ch = current;
     const int startLine = line;
     const int startCol = column;
+    const int count = consumeRun();
+    return RawToken(RawKind::Punctuation, ch, startLine, startCol, count);
+}
+
+int Scanner::consumeRun() {
+    const char ch = current;
     int count = 0;
     if (commentCfg.collapseDuplicates) {
         while (current == ch) {
@@ -243,31 +351,51 @@ RawToken Scanner::readPunctuation() {
         next();
     }
 
-    return RawToken(RawKind::Punctuation, ch, startLine, startCol, count);
+    return count;
 }
 
 const StringPrefix* Scanner::stringPrefixBefore() const {
     if (commentCfg.stringPrefixes.empty()) return nullptr;
     auto word = [&](size_t i) {
-        const unsigned char c = static_cast<unsigned char>(source[i]);
+        const unsigned char c = static_cast<unsigned char>(input()[i]);
         return std::isalnum(c) || c == '_';
     };
     size_t start = position;
     while (start > 0 && word(start - 1)) --start;
-    const std::string_view before(source.data() + start, position - start);
+    const std::string_view before(input().data() + start, position - start);
     for (const auto& p : commentCfg.stringPrefixes)
         if (before == p.prefix) return &p;
     return nullptr;
 }
 
 RawToken Scanner::readText(const QuoteConfig* reading) {
-    if (!isTextBegin(current)) { throw ScannerError("Not Text in readText -> " + std::to_string(current), line, column); }
-
-    char startChar = current;
-    int startColumn = column;
-    int startLine = line;
+    const int startColumn = column, startLine = line;
+    const RawKind type = current == '\'' ? RawKind::Char : current == '"' ? RawKind::String : RawKind::Text;
     String result;
-    RawKind type = current == '\'' ? RawKind::Char : current == '"' ? RawKind::String : RawKind::Text;
+    consumeText<true>(reading, &result);
+    return RawToken(type, std::move(result), startLine, startColumn);
+}
+
+void Scanner::scanText(const QuoteConfig* reading) {
+    const size_t begin = position;
+    const int startColumn = column, startLine = line;
+    const RawKind type = current == '\'' ? RawKind::Char : current == '"' ? RawKind::String : RawKind::Text;
+    std::optional<String> result;
+    if (indexedOutput_) {
+        consumeText<false>(reading, nullptr);
+    } else {
+        result.emplace();
+        consumeText<true>(reading, &*result);
+    }
+    emit(type, begin, position - begin, startLine, startColumn, -1,
+         [&] { return std::move(*result); });
+}
+
+template <bool KeepText>
+void Scanner::consumeText(const QuoteConfig* reading, String* result) {
+    if (!isTextBegin(current)) { throw ScannerError("Not Text in readText -> " + std::to_string(current), line, column); }
+    const char startChar = current;
+    auto appendChar = [&](char c) { if constexpr (KeepText) *result += c; };
     const QuoteConfig* quote = reading ? reading : quoteConfig(startChar);
     const bool raw = quote && quote->raw;
     const bool escapes = !quote || quote->escapes;
@@ -276,20 +404,20 @@ RawToken Scanner::readText(const QuoteConfig* reading) {
 
     while (hasNext()) {
         if (current == startChar) {
-            if (!doubled || position + 1 >= sourceLength || source[position + 1] != startChar) break;
+            if (!doubled || position + 1 >= sourceLength || input()[position + 1] != startChar) break;
             // A doubled quote is one quote character of the text.
-            result += startChar;
-            if (raw) result += startChar;
+            appendChar(startChar);
+            if (raw) appendChar(startChar);
             next();
             next();
             continue;
         }
         if (current == '\\' && escapes && raw) {
             // Kept as written; the escaped character cannot close the text.
-            result += current;
+            appendChar(current);
             step();
             if (!hasNext()) throw ScannerError("Unfinished escape sequence in string literal", line, column);
-            result += current;
+            appendChar(current);
             step();
             continue;
         }
@@ -300,20 +428,20 @@ RawToken Scanner::readText(const QuoteConfig* reading) {
             next();
             const char escaped = current;
             switch (escaped) {
-                case 'n':  result += '\n'; break;
-                case 't':  result += '\t'; break;
-                case 'r':  result += '\r'; break;
-                case 'a':  result += '\a'; break;
-                case 'b':  result += '\b'; break;
-                case 'f':  result += '\f'; break;
-                case 'v':  result += '\v'; break;
-                case '\\': result += '\\'; break;
+                case 'n':  appendChar('\n'); break;
+                case 't':  appendChar('\t'); break;
+                case 'r':  appendChar('\r'); break;
+                case 'a':  appendChar('\a'); break;
+                case 'b':  appendChar('\b'); break;
+                case 'f':  appendChar('\f'); break;
+                case 'v':  appendChar('\v'); break;
+                case '\\': appendChar('\\'); break;
                 case '\n': 
                 case '\r': /* C/C++ line continuation: \ + newline removed */ break;
-                case '?':  result += '?'; break; /* C++ trigraph prevention */
-                case '\'': result += '\''; break;
-                case '"':  result += '"'; break;
-                case '`':  result += '`'; break;
+                case '?':  appendChar('?'); break; /* C++ trigraph prevention */
+                case '\'': appendChar('\''); break;
+                case '"':  appendChar('"'); break;
+                case '`':  appendChar('`'); break;
                 default:
                     if (escaped == 'x') {
                         auto hexValue = [](char d) -> int {
@@ -325,7 +453,7 @@ RawToken Scanner::readText(const QuoteConfig* reading) {
                         int value = 0;
                         int digits = 0;
                         while ((position + 1) < sourceLength) {
-                            const char d = source[position + 1];
+                            const char d = input()[position + 1];
                             const int hv = hexValue(d);
                             if (hv < 0) break;
                             next();
@@ -335,21 +463,21 @@ RawToken Scanner::readText(const QuoteConfig* reading) {
                         if (digits == 0) {
                             throw ScannerError("Invalid hex escape in string literal", line, column);
                         }
-                        result += static_cast<char>(value & 0xFF);
+                        appendChar(static_cast<char>(value & 0xFF));
                     } else if (escaped >= '0' && escaped <= '7') {
                         // C/C++ octal escapes: \0 ... \777 (consume up to 3 octal digits total).
                         int value = static_cast<int>(escaped - '0');
                         int digits = 1;
                         while (digits < 3 && (position + 1) < sourceLength) {
-                            const char d = source[position + 1];
+                            const char d = input()[position + 1];
                             if (d < '0' || d > '7') break;
                             next();
                             value = (value * 8) + static_cast<int>(current - '0');
                             ++digits;
                         }
-                        result += static_cast<char>(value & 0xFF);
+                        appendChar(static_cast<char>(value & 0xFF));
                     } else if (escaped == startChar) {
-                        result += startChar;
+                        appendChar(startChar);
                     } else {
                         throw ScannerError("Unknown escape in string literal", line, column);
                     }
@@ -358,11 +486,20 @@ RawToken Scanner::readText(const QuoteConfig* reading) {
             step();  // a line continuation passes a newline
             continue;
 
-        } else {
-            result += current;
         }
 
-        step();
+        // Copy ordinary text in one piece. Newlines and quote/escape rules
+        // still go through the stateful paths above.
+        const size_t begin = position;
+        size_t end = begin;
+        while (end < sourceLength && input()[end] != startChar && input()[end] != '\n' &&
+               (!escapes || input()[end] != '\\')) ++end;
+        if constexpr (KeepText) result->append(input(), begin, end - begin);
+        advanceN(end - begin);
+        if (current == '\n') {
+            appendChar(current);
+            step();
+        }
     }
 
     if (hasNext() && current != startChar) { // will need to use a current check on hasNext() or just remove it
@@ -370,8 +507,6 @@ RawToken Scanner::readText(const QuoteConfig* reading) {
     }
 
     next();
-
-    return RawToken(type, result, startLine, startColumn);
 }
 
 RawToken Scanner::readNumber() {
@@ -381,28 +516,32 @@ RawToken Scanner::readNumber() {
 
     const int startLine = line;
     const int startCol  = column;
+    const size_t begin = position;
+    consumeNumber();
+    return RawToken(RawKind::Number, String(input().substr(begin, position - begin)), startLine, startCol);
+}
 
-    String number;
+void Scanner::consumeNumber() {
+    const size_t begin = position;
+    size_t end = begin;
     bool seenDot = false;
-    while (position < sourceLength) {
-        if (isDigit(current)) {
-            number += current;
-            next();
+    while (end < sourceLength) {
+        if (isDigit(input()[end])) {
+            ++end;
             continue;
         }
 
-        if (!seenDot && current == '.' && (position + 1) < sourceLength && isDigit(source[position + 1]))
+        if (!seenDot && input()[end] == '.' && (end + 1) < sourceLength && isDigit(input()[end + 1]))
         {
             seenDot = true;
-            number += current;
-            next();
+            ++end;
             continue;
         }
 
         break;
     }
 
-    return RawToken(RawKind::Number, number, startLine, startCol);
+    advanceN(end - begin);
 }
 
 RawToken Scanner::readIdentifier() {
@@ -410,18 +549,23 @@ RawToken Scanner::readIdentifier() {
 
     int startCol = column;
     int startLine = line;
-    String accum;
+    const size_t begin = position;
+    consumeIdentifier();
+    return RawToken(RawKind::Identifier, String(input().substr(begin, position - begin)), startLine, startCol);
+}
 
-    while (true) {
-        if (isLetter(current) || isDigit(current)) { accum += current; }
-        else if (current == '_') { accum += current; }
-        else break;
-
-        if (!hasNext()) break;
-        next();
+void Scanner::consumeIdentifier(const std::array<uint16_t, 256>* classifications) {
+    const size_t begin = position;
+    size_t end = begin;
+    if (classifications) {
+        const auto bytes = input();
+        while (end < sourceLength &&
+               ((*classifications)[static_cast<unsigned char>(bytes[end])] & IdentifierPart)) ++end;
+    } else {
+        // Public readIdentifier() also works outside scan(), without a table.
+        while (end < sourceLength && (isLetter(input()[end]) || isDigit(input()[end]))) ++end;
     }
-
-    return RawToken(RawKind::Identifier, accum, startLine, startCol);
+    advanceN(end - begin);
 }
 
 bool Scanner::handleSpecialChars() {
@@ -429,7 +573,7 @@ bool Scanner::handleSpecialChars() {
         String accum;
         accum += current;
         while (hasNext() && isSpecialChar(current)) {
-            if (handleSpecialChar(source[position], current, accum)) {
+            if (handleSpecialChar(input()[position], current, accum)) {
                 next();
             }
         }
@@ -470,12 +614,12 @@ void Scanner::step() {
 }
 
 bool Scanner::atLineEnd() const {
-    return current == '\n' || (current == '\r' && position + 1 < sourceLength && source[position + 1] == '\n');
+    return current == '\n' || (current == '\r' && position + 1 < sourceLength && input()[position + 1] == '\n');
 }
 
 bool Scanner::lineCommentMayStart() const {
     if (!commentCfg.lineStartsNeedSpace || position == textBegin) return true;
-    const char prev = source[position - 1];
+    const char prev = input()[position - 1];
     return prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r';
 }
 
@@ -487,9 +631,9 @@ const QuoteConfig* Scanner::quoteConfig(char quote) const {
 
 int Scanner::lineIndent(size_t pos) const {
     size_t start = pos;
-    while (start > 0 && source[start - 1] != '\n') --start;
+    while (start > 0 && input()[start - 1] != '\n') --start;
     int indent = 0;
-    while (start + indent < sourceLength && (source[start + indent] == ' ' || source[start + indent] == '\t')) ++indent;
+    while (start + indent < sourceLength && (input()[start + indent] == ' ' || input()[start + indent] == '\t')) ++indent;
     return indent;
 }
 
@@ -499,14 +643,14 @@ const TextBlockConfig* Scanner::matchTextBlock() const {
         if (!matchAt(position, block.opener)) continue;
         if (best && block.opener.size() <= best->opener.size()) continue;
         if (block.endsLine) {
-            if (position > 0 && source[position - 1] != ' ' && source[position - 1] != '\t' &&
-                source[position - 1] != '\n') continue;
+            if (position > 0 && input()[position - 1] != ' ' && input()[position - 1] != '\t' &&
+                input()[position - 1] != '\n') continue;
             size_t after = position + block.opener.size();
-            while (after < sourceLength && (source[after] == ' ' || source[after] == '\t' || source[after] == '\r')) ++after;
+            while (after < sourceLength && (input()[after] == ' ' || input()[after] == '\t' || input()[after] == '\r')) ++after;
             bool comment = false;
             for (const auto& start : commentCfg.lineStarts)
                 comment = comment || (after > position + block.opener.size() && matchAt(after, start));
-            if (after < sourceLength && source[after] != '\n' && !comment) continue;
+            if (after < sourceLength && input()[after] != '\n' && !comment) continue;
         }
         best = &block;
     }
@@ -517,7 +661,7 @@ bool Scanner::tryScanTextBlock() {
     const TextBlockConfig* block = matchTextBlock();
     if (!block) return false;
     const int openerIndent = lineIndent(position);
-    rawTokens.emplace_back(RawKind::TextBlockStart, block->opener, line, column);
+    emitRange(RawKind::TextBlockStart, position, block->opener.size(), line, column);
     advanceN(block->opener.size());
     if (block->closer.empty()) scanIndentedText(openerIndent);
     else scanDelimitedText(block->closer);
@@ -535,33 +679,35 @@ void Scanner::scanIndentedText(int openerIndent) {
     struct Line { size_t begin, end; };
     Vector<Line> lines;
     size_t at = position;  // a newline (or the end)
-    while (at < sourceLength && source[at] == '\n') {
+    while (at < sourceLength && input()[at] == '\n') {
         size_t begin = at + 1;
         int indent = 0;
-        while (begin < sourceLength && (source[begin] == ' ' || source[begin] == '\t')) { ++begin; ++indent; }
+        while (begin < sourceLength && (input()[begin] == ' ' || input()[begin] == '\t')) { ++begin; ++indent; }
         if (begin >= sourceLength) break;
-        if (source[begin] == '\n' || source[begin] == '\r') {  // blank: part of the block if text follows
-            at = source[begin] == '\r' ? begin + 1 : begin;
+        if (input()[begin] == '\n' || input()[begin] == '\r') {  // blank: part of the block if text follows
+            at = input()[begin] == '\r' ? begin + 1 : begin;
             continue;
         }
         if (indent <= openerIndent) break;
         size_t end = begin;
-        while (end < sourceLength && source[end] != '\n') ++end;
+        while (end < sourceLength && input()[end] != '\n') ++end;
         lines.push_back({begin, end});
         at = end;
     }
 
     for (const auto& text : lines) {
+        const size_t nlBegin = position;
         const int nlLine = line, nlColumn = column;
         int newlines = 0;
         while (position < text.begin) {
             if (current == '\n') ++newlines;
             step();
         }
-        rawTokens.emplace_back(RawKind::Newline, "\n", nlLine, nlColumn, newlines);
+        emit(RawKind::Newline, nlBegin, position - nlBegin, nlLine, nlColumn, newlines,
+             [] { return String("\n"); });
         size_t end = text.end;
-        if (end > text.begin && source[end - 1] == '\r') --end;
-        rawTokens.emplace_back(RawKind::TextLine, source.substr(text.begin, end - text.begin), line, column);
+        if (end > text.begin && input()[end - 1] == '\r') --end;
+        emitRange(RawKind::TextLine, text.begin, end - text.begin, line, column);
         while (position < text.end) step();
     }
 }
@@ -577,17 +723,19 @@ void Scanner::scanDelimitedText(const String& closer) {
         const bool closing = matchAt(position, closer);
         if (closing || current == '\n') {
             size_t end = position;
-            if (end > begin && source[end - 1] == '\r') --end;
-            if (end > begin) rawTokens.emplace_back(RawKind::TextLine, source.substr(begin, end - begin), segLine, segColumn);
+            if (end > begin && input()[end - 1] == '\r') --end;
+            if (end > begin) emitRange(RawKind::TextLine, begin, end - begin, segLine, segColumn);
             if (closing) {
-                rawTokens.emplace_back(RawKind::TextBlockEnd, closer, line, column);
+                emitRange(RawKind::TextBlockEnd, position, closer.size(), line, column);
                 advanceN(closer.size());
                 return;
             }
             const int nlLine = line, nlColumn = column;
+            const size_t nlBegin = position;
             int newlines = 0;
             while (current == '\n') { ++newlines; step(); }
-            rawTokens.emplace_back(RawKind::Newline, "\n", nlLine, nlColumn, newlines);
+            emit(RawKind::Newline, nlBegin, position - nlBegin, nlLine, nlColumn, newlines,
+                 [] { return String("\n"); });
             begin = position;
             segLine = line;
             segColumn = column;
@@ -599,17 +747,19 @@ void Scanner::scanDelimitedText(const String& closer) {
 
 bool Scanner::matchAt(size_t pos, const String& s) const {
     if (s.empty()) {return false;}
-    if (pos + s.size() > sourceLength) {return false;}
-    return source.compare(pos, s.size(), s) == 0;
+    if (pos >= sourceLength || s.size() > sourceLength - pos) {return false;}
+    if (input()[pos] != s.front()) return false;
+    return input().compare(pos, s.size(), s) == 0;
 }
 
 void Scanner::advanceN(size_t n) {
-    // Advance n characters, updating column (and line if '\n' is seen
-    for (size_t i = 0; i < n && position < sourceLength; ++i) {
-        ++position;
-        ++column;
+    // Delimiters and single-line spans advance columns only; step() counts newlines.
+    if (position < sourceLength) {
+        const size_t count = std::min(n, sourceLength - position);
+        position += count;
+        column += static_cast<int>(count);
     }
-    current = (position < sourceLength) ? source[position] : '\0';
+    current = (position < sourceLength) ? input()[position] : '\0';
 }
 
 
@@ -800,14 +950,12 @@ bool Scanner::tryScanComment() {
     StartKind bestKind = StartKind::None;
     size_t bestLen = 0;
     int bestBlockIndex = -1;
-    String bestLexeme;
 
     const bool lineMayStart = lineCommentMayStart();
     for (const auto& ls : commentCfg.lineStarts) {
         if (lineMayStart && matchAt(position, ls) && ls.size() > bestLen) {
             bestKind = StartKind::Line;
             bestLen = ls.size();
-            bestLexeme = ls;
             bestBlockIndex = -1;
         }
     }
@@ -816,7 +964,6 @@ bool Scanner::tryScanComment() {
         if (matchAt(position, bs) && bs.size() > bestLen) {
             bestKind = StartKind::Block;
             bestLen = bs.size();
-            bestLexeme = bs;
             bestBlockIndex = i;
         }
     }
@@ -825,22 +972,37 @@ bool Scanner::tryScanComment() {
 
     const int startLine = line;
     const int startCol  = column;
+    const size_t begin = position;
 
     if (bestKind == StartKind::Line) {
-        advanceN(bestLexeme.size());
-        RawToken body = scanLineCommentBody();
+        advanceN(bestLen);
+        const size_t bodyBegin = position;
+        const int bodyLine = line, bodyColumn = column;
+        const auto body = consumeLineCommentBody();
         if (commentCfg.skipComments) return true;
-        rawTokens.emplace_back(RawKind::CommentLineStart, bestLexeme, startLine, startCol, -1);
-        rawTokens.emplace_back(std::move(body));
+        emitRange(RawKind::CommentLineStart, begin, bestLen, startLine, startCol);
+        emit(RawKind::Comment, bodyBegin, position - bodyBegin, bodyLine, bodyColumn, -1,
+             [body] { return String(body); });
         return true;
     }
 
-    advanceN(bestLexeme.size());
-    RawToken body = scanBlockCommentBody(bestBlockIndex);
+    advanceN(bestLen);
+    const size_t bodyBegin = position;
+    const int bodyLine = line, bodyColumn = column;
+    std::optional<String> body;
+    if (commentCfg.skipComments || indexedOutput_) {
+        consumeBlockCommentBody<false>(bestBlockIndex, nullptr);
+    } else {
+        body.emplace();
+        consumeBlockCommentBody<true>(bestBlockIndex, &*body);
+    }
     if (commentCfg.skipComments) return true;
-    rawTokens.emplace_back(RawKind::CommentBlockStart, bestLexeme, startLine, startCol, bestBlockIndex);
-    rawTokens.emplace_back(std::move(body));
-    rawTokens.emplace_back(RawKind::CommentBlockEnd, commentCfg.blockPairs[bestBlockIndex].end, line, column, bestBlockIndex);
+    const size_t endLength = commentCfg.blockPairs[bestBlockIndex].end.size();
+    const size_t endBegin = position - endLength;
+    emitRange(RawKind::CommentBlockStart, begin, bestLen, startLine, startCol, bestBlockIndex);
+    emit(RawKind::Comment, bodyBegin, endBegin - bodyBegin, bodyLine, bodyColumn, bestBlockIndex,
+         [&] { return std::move(*body); });
+    emitRange(RawKind::CommentBlockEnd, endBegin, endLength, line, column, bestBlockIndex);
     return true;
 }
 
@@ -850,22 +1012,23 @@ bool Scanner::tryScanPreprocessorDirective() {
     if (!matchAt(position, ppCfg.marker)) return false;
 
     size_t probe = position + ppCfg.marker.size();
-    while (probe < sourceLength && (source[probe] == ' ' || source[probe] == '\t')) ++probe;
+    while (probe < sourceLength && (input()[probe] == ' ' || input()[probe] == '\t')) ++probe;
 
     const size_t keyStart = probe;
-    while (probe < sourceLength && (std::isalpha(static_cast<unsigned char>(source[probe])) || source[probe] == '_')) {
+    while (probe < sourceLength && (std::isalpha(static_cast<unsigned char>(input()[probe])) || input()[probe] == '_')) {
         ++probe;
     }
-    const String key = source.substr(keyStart, probe - keyStart);
+    const auto key = input().substr(keyStart, probe - keyStart);
 
     for (const auto& entry : ppCfg.keys) {
         if (entry.key != key) continue;
 
         const int startLine = line;
         const int startCol = column;
+        const size_t begin = position;
         advanceN(probe - position);
-        rawTokens.emplace_back(RawToken(RawKind::Preprocessor, ppCfg.marker + key, startLine, startCol));
-        rawTokens.back().ppKind = entry.kind;
+        emit(RawKind::Preprocessor, begin, probe - begin, startLine, startCol, -1,
+             [&] { return ppCfg.marker + String(key); }, entry.kind);
         return true;
     }
 
@@ -875,43 +1038,58 @@ bool Scanner::tryScanPreprocessorDirective() {
 RawToken Scanner::scanLineCommentBody() {
     const int startLine = line;
     const int startCol  = column;
+    const auto body = consumeLineCommentBody();
+    return RawToken(RawKind::Comment, String(body), startLine, startCol, -1);
+}
 
-    String text;
-    while (position < sourceLength && !atLineEnd()) {
-        text += current;
-        next();
-    }
-    if (!text.empty() && text[0] == ' ') text.erase(0, 1);
-    return RawToken(RawKind::Comment, text, startLine, startCol, -1);
+std::string_view Scanner::consumeLineCommentBody() {
+    size_t begin = position;
+    size_t end = std::min(input().find('\n', begin), sourceLength);
+    if (end < sourceLength && end > begin && input()[end - 1] == '\r') --end;
+    advanceN(end - begin);
+    if (begin < end && input()[begin] == ' ') ++begin;
+    return input().substr(begin, end - begin);
 }
 
 RawToken Scanner::scanBlockCommentBody(int pairIndex) {
     const int startLine = line;
     const int startCol  = column;
+    String text;
+    consumeBlockCommentBody<true>(pairIndex, &text);
+    return RawToken(RawKind::Comment, std::move(text), startLine, startCol, pairIndex);
+}
+
+template <bool KeepText>
+void Scanner::consumeBlockCommentBody(int pairIndex, String* text) {
+    const int startLine = line;
+    const int startCol  = column;
     const auto& pair = commentCfg.blockPairs[pairIndex];
 
-    String text;
+    size_t begin = position;
     int depth = 1;
 
     while (position < sourceLength) {
         // nested start
         if (pair.nestable && matchAt(position, pair.start)) {
+            if constexpr (KeepText) text->append(input(), begin, position - begin);
             advanceN(pair.start.size());
+            begin = position;
             depth++;
             continue;
         }
 
         // end
         if (matchAt(position, pair.end)) {
+            if constexpr (KeepText) text->append(input(), begin, position - begin);
             advanceN(pair.end.size());
+            begin = position;
             depth--;
             if (depth == 0) {
-                return RawToken(RawKind::Comment, text, startLine, startCol, pairIndex);
+                return;
             }
             continue;
         }
 
-        text += current;
         next();
     }
 

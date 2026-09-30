@@ -1,3 +1,5 @@
 build
 .cache/
-tests
+tests/*
+!tests/*Test.cpp
+!tests/Benchmark.cpp

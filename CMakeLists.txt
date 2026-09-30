@@ -11,6 +11,7 @@ include(CMakePackageConfigHelpers)
 option(LEX_BUILD_SHARED "Build Lex as a shared library" OFF)
 option(LEX_BUILD_EXAMPLES "Build Lex examples" OFF)
 option(LEX_BUILD_TESTS "Build Lex regression tests" OFF)
+option(LEX_BUILD_BENCHMARKS "Build Lex performance benchmark" OFF)
 
 set(LEX_HEADERS
   ${CMAKE_CURRENT_SOURCE_DIR}/include/lex/Scanner.hpp
@@ -59,6 +60,20 @@ if(LEX_BUILD_TESTS)
   target_link_libraries(lex_scanner_test PRIVATE Lex::lex)
   target_compile_features(lex_scanner_test PRIVATE cxx_std_20)
   add_test(NAME lex_scanner_test COMMAND lex_scanner_test)
+  add_executable(lex_pipeline_test tests/PipelineTest.cpp)
+  target_link_libraries(lex_pipeline_test PRIVATE Lex::lex)
+  target_compile_features(lex_pipeline_test PRIVATE cxx_std_20)
+  add_test(NAME lex_pipeline_test COMMAND lex_pipeline_test)
+  add_executable(lex_stream_test tests/StreamTest.cpp)
+  target_link_libraries(lex_stream_test PRIVATE Lex::lex)
+  target_compile_features(lex_stream_test PRIVATE cxx_std_20)
+  add_test(NAME lex_stream_test COMMAND lex_stream_test)
+endif()
+
+if(LEX_BUILD_BENCHMARKS)
+  add_executable(lex_benchmark tests/Benchmark.cpp)
+  target_link_libraries(lex_benchmark PRIVATE Lex::lex)
+  target_compile_features(lex_benchmark PRIVATE cxx_std_20)
 endif()
 
 install(TARGETS lex

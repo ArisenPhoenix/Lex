@@ -2,7 +2,9 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <stdexcept>
 #include <iostream>
@@ -90,6 +92,29 @@ struct RawToken {
 
 
     RawToken(RawKind t): kind(t), line(-1), column(-1) {}
+};
+
+// A token's original spelling in a caller-owned source. Offsets and lengths
+// count bytes, not Unicode characters. No source pointer is retained.
+// Unlike RawToken::lexeme, text() includes quotes/escapes, complete collapsed
+// runs, and nested comment delimiters. SOF/EOF have empty ranges.
+struct IndexedToken {
+    // Wide fields first to avoid padding between the kind and the indices.
+    size_t offset = 0;
+    size_t length = 0;
+    int line = -1;
+    int column = -1;
+    int aux = -1;
+    RawKind kind = RawKind::Unknown;
+    PreprocessorKind ppKind = PreprocessorKind::None;
+
+    // Supply the same bytes that were scanned, in any buffer. The returned
+    // view borrows that buffer; copying it into a String gives owning text.
+    std::string_view text(std::string_view source) const {
+        if (offset > source.size() || length > source.size() - offset)
+            throw std::out_of_range("IndexedToken range exceeds source");
+        return source.substr(offset, length);
+    }
 };
 
 struct CommentPair {
@@ -222,8 +247,19 @@ public:
     RawToken noOpToken = RawToken(RawKind::NoOp);
     CommentConfig commentCfg;
 
+    // Streaming mode: set commentCfg, then call stream() for each source.
+    // The existing source-taking constructors continue to use scan().
+    Scanner();
     Scanner(const char* sourceFile, const CommentConfig& cfg);
     Scanner(String src, CommentConfig cfg);
+
+    // Only available on a default-constructed Scanner; otherwise throws
+    // std::logic_error. Reads the complete supplied buffer synchronously,
+    // without copying or retaining it. This is not chunked/incremental input.
+    // Uses the current commentCfg, starts fresh on every call (also after
+    // errors), and returns indices without populating rawTokens. The public
+    // cursor is reset to an empty input when the call finishes or throws.
+    Vector<IndexedToken> stream(std::string_view source);
 
     char next();
     bool hasNext();
@@ -271,6 +307,30 @@ public:
 
     Vector<RawToken> scan();
 private:
+    bool streamOnly_ = false;
+    std::string_view streamSource_;
+    Vector<IndexedToken>* indexedOutput_ = nullptr;
+    std::string_view input() const { return streamOnly_ ? streamSource_ : std::string_view(source); }
+    void scanTokens();
+    // The lexeme factory runs only for owning output. Streaming constructs
+    // an IndexedToken directly from the components, without a RawToken.
+    template <typename MakeLexeme>
+    void emit(RawKind kind, size_t offset, size_t length, int line, int column, int aux,
+              MakeLexeme&& makeLexeme, PreprocessorKind ppKind = PreprocessorKind::None);
+    void emitRange(RawKind kind, size_t offset, size_t length, int line, int column, int aux = -1);
+
+    // Readers advance the cursor without constructing tokens. KeepText=false
+    // validates/consumes transformed text without materializing it.
+    void consumeIdentifier(const std::array<uint16_t, 256>* classifications = nullptr);
+    void consumeNumber();
+    int consumeRun();
+    template <bool KeepText>
+    void consumeText(const QuoteConfig* reading, String* text);
+    void scanText(const QuoteConfig* reading);
+    std::string_view consumeLineCommentBody();
+    template <bool KeepText>
+    void consumeBlockCommentBody(int pairIndex, String* text);
+
     // ---- helpers ----
     bool inBounds(size_t pos) const;
 

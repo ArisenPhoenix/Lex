@@ -2,6 +2,21 @@
 #include "lex/Structurizer.hpp"
 
 #include <algorithm>
+#include <array>
+
+namespace {
+// Scanner punctuation is one byte. Keep the general string matching path
+// for callers that supply their own, possibly multi-character, RawTokens.
+std::array<unsigned char, 256> delimiterFlags(const Vector<String>& openers,
+                                              const Vector<String>& closers) {
+    std::array<unsigned char, 256> flags{};
+    for (const auto& opener : openers)
+        if (opener.size() == 1) flags[static_cast<unsigned char>(opener[0])] |= 1;
+    for (const auto& closer : closers)
+        if (closer.size() == 1) flags[static_cast<unsigned char>(closer[0])] |= 2;
+    return flags;
+}
+}
 
 Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
     Vector<RawToken> out;
@@ -41,6 +56,7 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
 
     if (cfg_.scopeMode == LayoutConfig::ScopeMode::Braces) {
         int scopeDepth = 0;
+        const auto scopes = delimiterFlags(cfg_.scopeOpeners, cfg_.scopeClosers);
 
         for (; i < in.size(); ++i) {
             const RawToken& t = in[i];
@@ -61,7 +77,9 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
                 continue;
             }
 
-            if (isScopeClose(t)) {
+            const bool singlePunctuation = t.kind == RawKind::Punctuation && t.lexeme.size() == 1;
+            const unsigned char flags = singlePunctuation ? scopes[static_cast<unsigned char>(t.lexeme[0])] : 0;
+            if (singlePunctuation ? (flags & 2) != 0 : isScopeClose(t)) {
                 // Scanner::readPunctuation folds a run of identical closers (e.g. "}}}")
                 // into a single token with aux set to the run length, so a closer here
                 // can account for more than one scope level.
@@ -77,7 +95,7 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
 
             emit(t);
 
-            if (isScopeOpen(t)) {
+            if (singlePunctuation ? (flags & 1) != 0 : isScopeOpen(t)) {
                 const int count = (t.aux > 0 ? t.aux : 1);
                 scopeDepth += count;
                 out.emplace_back(RawKind::Indent, "", t.line, t.column, scopeDepth);
@@ -100,6 +118,7 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
     int pendingIndent = 0;
 
     int parenDepth = 0;
+    const auto brackets = delimiterFlags(cfg_.bracketOpeners, cfg_.bracketClosers);
     // The previous content token on this line was an indent marker that
     // indented its content (so a following marker may indent again).
     bool afterMarker = false;
@@ -120,7 +139,17 @@ Vector<RawToken> Structurizer::structurize(const Vector<RawToken>& in) {
         // before its first token: a line opening with '{' still starts at
         // depth 0 (and indents), one opening with ')' is still inside.
         const int depthBefore = parenDepth;
-        parenDepth = std::max(0, parenDepth + bracketDelta(t));
+        if (t.kind == RawKind::Punctuation) {
+            int delta;
+            if (t.lexeme.size() == 1) {
+                const auto flags = brackets[static_cast<unsigned char>(t.lexeme[0])];
+                const int count = t.aux > 0 ? t.aux : 1;
+                delta = (flags & 1) ? count : (flags & 2) ? -count : 0;
+            } else {
+                delta = bracketDelta(t);
+            }
+            parenDepth = std::max(0, parenDepth + delta);
+        }
         if (t.kind == RawKind::TextBlockStart) inTextBlock = true;
         else if (t.kind != RawKind::TextLine && t.kind != RawKind::Newline && t.kind != RawKind::TextBlockEnd &&
                  t.kind != RawKind::Space && t.kind != RawKind::Tab && !isCommentToken(t))
