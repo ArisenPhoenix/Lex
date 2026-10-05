@@ -115,6 +115,36 @@ void prefixReadings() {
     });
 }
 
+void delimitedReadings() {
+    CommentConfig config;
+    for (const char* p : {"R", "u8R"}) {
+        StringPrefix raw{p};
+        raw.hasReading = true;
+        raw.reading.delimited = true;
+        config.stringPrefixes.push_back(raw);
+    }
+    // Backslashes and quotes inside are text; only ')' delimiter '"' closes.
+    expect("R\"(a\\d\"b)\" x", config, {
+        token(RawKind::Identifier, "R", 1, 1),
+        token(RawKind::String, "a\\d\"b", 1, 2),
+        token(RawKind::Identifier, "x", 1, 12),
+    });
+    expect("R\"x(a)\"b)x\"", config, {
+        token(RawKind::Identifier, "R", 1, 1),
+        token(RawKind::String, "a)\"b", 1, 2),
+    });
+    // Newlines inside are counted.
+    expect("u8R\"(one\ntwo)\"\ny", config, {
+        token(RawKind::Identifier, "u8R", 1, 1),
+        token(RawKind::String, "one\ntwo", 1, 4),
+        token(RawKind::Identifier, "y", 3, 1),
+    });
+    try {
+        Scanner("R\"(unterminated", config).scan();
+        throw std::runtime_error("Unterminated raw string was accepted");
+    } catch (const ScannerError&) {}
+}
+
 } // namespace
 
 int main() {
@@ -122,6 +152,7 @@ int main() {
         codeQuotes();
         yamlQuotes();
         prefixReadings();
+        delimitedReadings();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

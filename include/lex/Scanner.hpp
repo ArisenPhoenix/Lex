@@ -164,6 +164,12 @@ struct QuoteConfig {
     // Two quotes in a row stand for one quote character inside the text
     // (SQL, YAML single quotes) instead of closing it.
     bool doubled = false;
+    // C++'s raw string: the quote is followed by a delimiter (up to 16
+    // characters, no spaces, parentheses or backslashes) and '(', and the
+    // text runs to ')', the same delimiter and the quote. Nothing between
+    // the parentheses is an escape or a closing quote; the text is exactly
+    // what they enclose. The other fields do not apply.
+    bool delimited = false;
 };
 
 // A word written directly before a quote with optional reading rules:
@@ -326,6 +332,9 @@ private:
     int consumeRun();
     template <bool KeepText>
     void consumeText(const QuoteConfig* reading, String* text);
+    // The rest of a delimited (C++ raw) text, the cursor on its quote.
+    template <bool KeepText>
+    void consumeDelimitedText(String* text);
     void scanText(const QuoteConfig* reading);
     std::string_view consumeLineCommentBody();
     template <bool KeepText>

@@ -392,11 +392,44 @@ void Scanner::scanText(const QuoteConfig* reading) {
 }
 
 template <bool KeepText>
+void Scanner::consumeDelimitedText(String* result) {
+    const char quote = current;
+    const int startLine = line, startColumn = column;
+    next();
+    const size_t delimiterBegin = position;
+    while (hasNext() && current != '(') {
+        if (current == ')' || current == '\\' || isWhiteSpace(current) || current == quote ||
+            position - delimiterBegin == 16)
+            throw ScannerError("Invalid raw string delimiter", line, column);
+        next();
+    }
+    if (!hasNext()) throw ScannerError("Unmatched quote for " + std::to_string(quote), startLine, startColumn);
+    const std::string_view delimiter = input().substr(delimiterBegin, position - delimiterBegin);
+    next();
+
+    // The closer is ')' delimiter quote; find it, then pass the text with
+    // step() so its newlines are counted.
+    String closer = ")";
+    closer.append(delimiter);
+    closer += quote;
+    const size_t end = input().find(closer, position);
+    if (end == std::string_view::npos)
+        throw ScannerError("Unmatched quote for " + std::to_string(quote), startLine, startColumn);
+    if constexpr (KeepText) result->append(input(), position, end - position);
+    while (position < end) step();
+    advanceN(closer.size());
+}
+
+template <bool KeepText>
 void Scanner::consumeText(const QuoteConfig* reading, String* result) {
     if (!isTextBegin(current)) { throw ScannerError("Not Text in readText -> " + std::to_string(current), line, column); }
     const char startChar = current;
     auto appendChar = [&](char c) { if constexpr (KeepText) *result += c; };
     const QuoteConfig* quote = reading ? reading : quoteConfig(startChar);
+    if (quote && quote->delimited) {
+        consumeDelimitedText<KeepText>(result);
+        return;
+    }
     const bool raw = quote && quote->raw;
     const bool escapes = !quote || quote->escapes;
     const bool doubled = quote && quote->doubled;
